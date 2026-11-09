@@ -8,4 +8,5 @@ next-env.d.ts
 playwright-report/
 test-results/
 .env*
+!/.env.example
 .next-verify/
