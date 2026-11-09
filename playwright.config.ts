@@ -12,7 +12,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: JSON.stringify(resolve(python)) + " -m uvicorn api.main:app --host 127.0.0.1 --port 8100",
+      command: JSON.stringify(resolve(python)) + " -m uvicorn tests.letter_analyzer:app --host 127.0.0.1 --port 8100",
       url: "http://127.0.0.1:8100/tickets",
     },
     {
