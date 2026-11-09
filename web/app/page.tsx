@@ -4,8 +4,11 @@ import {
   Activity, ArrowRight, AudioLines, Check, ChevronRight, CircleHelp,
   Headset, Inbox, Radio, Route, ScanLine, Wrench,
 } from "lucide-react";
-import { type FormEvent, useEffect, useRef, useState } from "react";
-import { createHandoff, listTickets, owners, type Owner, type Ticket } from "../lib/tickets";
+import { type FormEvent, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
+import {
+  createHandoff, LetterSubmissionError, listTickets, owners, submitLetter,
+  type EvidenceSpan, type Owner, type Ticket,
+} from "../lib/tickets";
 
 const kindLabels = {
   mixed: "Opportunity",
@@ -52,6 +55,76 @@ function TicketList({ tickets, selectedId, onSelect }: {
         ))}
       </ul>
     </aside>
+  );
+}
+
+type LetterSubmission =
+  | { status: "idle" | "invalid" | "pending" }
+  | { status: "error"; message: string };
+
+function NewLetterForm({ onCreated }: { onCreated: (ticket: Ticket) => void }) {
+  const [customer, setCustomer] = useState("");
+  const [body, setBody] = useState("");
+  const [submission, setSubmission] = useState<LetterSubmission>({ status: "idle" });
+  const disclosure = useRef<HTMLDetailsElement>(null);
+  const customerField = useRef<HTMLInputElement>(null);
+  const messageField = useRef<HTMLTextAreaElement>(null);
+  const pending = submission.status === "pending";
+  const customerInvalid = submission.status === "invalid" && !customer.trim();
+  const messageInvalid = submission.status === "invalid" && !body.trim();
+
+  async function analyze(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    if (!customer.trim() || !body.trim()) {
+      setSubmission({ status: "invalid" });
+      (customer.trim() ? messageField : customerField).current?.focus();
+      return;
+    }
+
+    setSubmission({ status: "pending" });
+    try {
+      const ticket = await submitLetter({ customer: customer.trim(), body });
+      setCustomer("");
+      setBody("");
+      setSubmission({ status: "idle" });
+      if (disclosure.current) disclosure.current.open = false;
+      onCreated(ticket);
+    } catch (error) {
+      setSubmission({
+        status: "error",
+        message: error instanceof LetterSubmissionError
+          ? error.message
+          : "Could not confirm the result. Check the ticket queue before trying again.",
+      });
+    }
+  }
+
+  return (
+    <details className="letter-intake" ref={disclosure}>
+      <summary><ScanLine size={17} /><strong>New letter</strong><ChevronRight size={16} /></summary>
+      <form className="letter-form" onSubmit={analyze} noValidate aria-busy={pending}>
+        <label htmlFor="letter-customer">Customer name</label>
+        <input
+          id="letter-customer" ref={customerField} value={customer} required disabled={pending}
+          aria-invalid={customerInvalid} aria-describedby={customerInvalid ? "letter-customer-error" : undefined}
+          onChange={(event) => setCustomer(event.target.value)}
+        />
+        {customerInvalid && <p className="error-note" id="letter-customer-error">Enter the customer’s name.</p>}
+        <label htmlFor="letter-message">Customer message</label>
+        <textarea
+          id="letter-message" ref={messageField} value={body} rows={5} required disabled={pending}
+          aria-invalid={messageInvalid} aria-describedby={messageInvalid ? "letter-message-error" : undefined}
+          onChange={(event) => setBody(event.target.value)}
+        />
+        {messageInvalid && <p className="error-note" id="letter-message-error">Paste the customer’s original message.</p>}
+        <button className="action" type="submit" disabled={pending}>
+          <span>{pending ? "Analyzing…" : "Analyze letter"}</span>
+          <ArrowRight size={16} />
+        </button>
+        {submission.status === "error" && <p className="error-note" role="alert">{submission.message}</p>}
+      </form>
+    </details>
   );
 }
 
@@ -117,13 +190,39 @@ function HandoffForm({ ticket, onUpdated }: {
   );
 }
 
-function TicketDetail({ ticket, onUpdated }: {
+function highlightMessage(characters: string[], evidence: EvidenceSpan[]) {
+  const spans: EvidenceSpan[] = [];
+  for (const span of evidence.toSorted((a, b) => a.start - b.start)) {
+    const last = spans.at(-1);
+    if (last && span.start < last.end) {
+      last.end = Math.max(last.end, span.end);
+    } else {
+      spans.push({ ...span });
+    }
+  }
+
+  const segments: ReactNode[] = [];
+  let cursor = 0;
+  for (const { start, end } of spans) {
+    segments.push(
+      characters.slice(cursor, start).join(""),
+      <mark key={start}>{characters.slice(start, end).join("")}</mark>,
+    );
+    cursor = end;
+  }
+  segments.push(characters.slice(cursor).join(""));
+  return segments;
+}
+
+function TicketDetail({ ticket, onUpdated, headingRef }: {
   ticket: Ticket;
   onUpdated: (ticket: Ticket) => void;
+  headingRef: Ref<HTMLHeadingElement>;
 }) {
   const { triage } = ticket;
   const isMixed = triage.kind === "mixed";
   const isClarify = triage.kind === "clarify";
+  const characters = Array.from(ticket.body);
 
   return (
     <article className="detail" aria-labelledby="ticket-heading">
@@ -134,17 +233,17 @@ function TicketDetail({ ticket, onUpdated }: {
           <span>{ticket.customer}</span>
           <span className="open-label"><i />{ticket.status === "open" && "Support open"}</span>
         </div>
-        <h2 id="ticket-heading">{ticket.title}</h2>
+        <h2 id="ticket-heading" ref={headingRef} tabIndex={-1}>{ticket.title}</h2>
         <div className="message">
           <h3 className="eyebrow" id="message-heading">Customer message</h3>
-          <p>{ticket.body}</p>
+          <p>{isMixed ? highlightMessage(characters, triage.evidence) : ticket.body}</p>
         </div>
       </section>
 
       <section className="triage" aria-labelledby="triage-heading">
         <div className="triage-heading">
           <h3 id="triage-heading"><ScanLine size={17} /> Triage review</h3>
-          <span className="mono">Sample assessment</span>
+          <span className="mono">{ticket.origin === "live" ? "Live analysis" : "Sample assessment"}</span>
         </div>
         <p className="triage-summary">{triage.summary}</p>
 
@@ -166,7 +265,9 @@ function TicketDetail({ ticket, onUpdated }: {
             <section className="track track-opportunity" aria-labelledby="opportunity-heading">
               <p className="track-tag"><Route size={15} /> Opportunity track</p>
               <h4 id="opportunity-heading">Commercial follow-up</h4>
-              {triage.evidence.map((quote) => <blockquote key={quote}>{quote}</blockquote>)}
+              {triage.evidence.map(({ start, end }) => (
+                <blockquote key={`${start}:${end}`}>{characters.slice(start, end).join("")}</blockquote>
+              ))}
               {triage.questions.length > 0 && (
                 <><p className="track-label">Questions for the handoff</p>
                 <ul className="track-list">
@@ -197,6 +298,8 @@ export default function InboxPage() {
   const [inbox, setInbox] = useState<InboxState>({ status: "loading" });
   const [selectedId, setSelectedId] = useState<string>();
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const ticketHeading = useRef<HTMLHeadingElement>(null);
+  const addedTicket = useRef<string>(undefined);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -216,6 +319,22 @@ export default function InboxPage() {
       : current,
     );
   }
+
+  function addTicket(ticket: Ticket) {
+    setInbox((current) => current.status === "ready"
+      ? { status: "ready", tickets: [...current.tickets, ticket] }
+      : current,
+    );
+    addedTicket.current = ticket.id;
+    setSelectedId(ticket.id);
+  }
+
+  useEffect(() => {
+    if (addedTicket.current && addedTicket.current === selectedId) {
+      addedTicket.current = undefined;
+      ticketHeading.current?.focus();
+    }
+  }, [selectedId]);
 
   const tickets = inbox.status === "ready" ? inbox.tickets : [];
   const selected = tickets.find((ticket) => ticket.id === selectedId) ?? tickets[0];
@@ -243,7 +362,7 @@ export default function InboxPage() {
           </div>
         </div>
 
-        {inbox.status === "loading" && <div className="notice" role="status">Loading sample tickets…</div>}
+        {inbox.status === "loading" && <div className="notice" role="status">Loading tickets…</div>}
         {inbox.status === "error" && (
           <div className="notice" role="alert">
             <strong>Ticket queue unavailable</strong>
@@ -254,11 +373,12 @@ export default function InboxPage() {
             }}>Retry loading tickets</button>
           </div>
         )}
+        {inbox.status === "ready" && <NewLetterForm onCreated={addTicket} />}
         {inbox.status === "ready" && !selected && <p className="notice">No tickets in the queue.</p>}
         {selected && (
           <div className="workspace-grid">
             <TicketList tickets={tickets} selectedId={selected.id} onSelect={setSelectedId} />
-            <TicketDetail ticket={selected} onUpdated={updateTicket} />
+            <TicketDetail ticket={selected} onUpdated={updateTicket} headingRef={ticketHeading} />
           </div>
         )}
       </main>

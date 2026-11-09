@@ -32,10 +32,20 @@ Open [the workbench](http://127.0.0.1:3000). On macOS or Linux, use `.venv/bin/p
 2. Open **RTC-1041**. Review the Flutter token troubleshooting steps.
 3. Open **RTC-1040**. Review what to ask about the recording use case and launch date.
 
-FastAPI serves three fictional tickets with prepared triage results. Handoffs are shared by browsers using the same API process and reset when that process stops. No model key or database is needed.
+FastAPI serves three fictional tickets with prepared triage results. You can review them and confirm a handoff without a model key. New tickets and handoffs reset when the API process stops.
+
+## Analyze a new letter
+
+Set `OPENAI_API_KEY` in the terminal that runs FastAPI, then restart the API. Set `OPENAI_MODEL` to override the default model, `gpt-5.4-mini`.
+
+1. Open **New letter**. Enter the customer name and paste a fictional customer message.
+2. Click **Analyze letter**. The workbench selects the new ticket and shows its triage under **Live analysis**.
+3. For an opportunity, compare each quote with the highlighted text in the customer message.
+
+The API sends the message body to OpenAI for analysis. It adds the ticket only after every evidence quote matches the original text.
 
 ## Verify the workbench
 
-With Chrome installed, run `npm run verify` from the repository root. Playwright starts a fresh API and workbench on ports 8100 and 3100. It exercises the three tickets against the real API. Run `npm run build` to check the production build.
+With Chrome installed, run `npm run verify` from the repository root. Playwright starts a fresh API and workbench on ports 8100 and 3100. It tests the three samples, handoff, and new-letter analysis with a fixed model response. Run `npm run build` to check the production build.
 
-The next milestone adds model analysis for new tickets. A later milestone stores tickets and confirmed handoffs in PostgreSQL.
+The next milestone stores tickets and confirmed handoffs in PostgreSQL.

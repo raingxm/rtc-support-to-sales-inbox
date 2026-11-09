@@ -45,3 +45,43 @@ test("routes three RTC tickets and keeps support open after a confirmed handoff"
   const hasOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   expect(hasOverflow).toBe(false);
 });
+
+test("checks a new letter against the source before adding it to the queue", async ({ page, request }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const queue = page.getByRole("complementary", { name: "Ticket queue" });
+  const customer = page.getByRole("textbox", { name: "Customer name" });
+  const message = page.getByRole("textbox", { name: "Customer message" });
+  const analyze = page.getByRole("button", { name: "Analyze letter" });
+  const body = "📹 Our recordings sometimes fail.\nWe want to launch a pilot next month.";
+  const before = await (await request.get("/api/tickets")).json();
+
+  await page.goto("/");
+  await page.getByText("New letter", { exact: true }).click();
+  await customer.fill("Cypress Video");
+
+  const rejectedBody = "📹 Our recordings sometimes fail.\nWe want to launch a pilot next quarter.";
+  await message.fill(rejectedBody);
+  const rejected = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/tickets" && response.request().method() === "POST",
+  );
+  await analyze.click();
+  expect((await rejected).status()).toBe(422);
+  await expect(page.getByRole("main").getByRole("alert")).toContainText("could not find this quote");
+  await expect(message).toHaveValue(rejectedBody);
+  expect(await (await request.get("/api/tickets")).json()).toEqual(before);
+  await expect(queue.getByRole("button")).toHaveCount(before.length);
+
+  await message.fill(body);
+  await analyze.click();
+  await expect(queue.getByRole("button", { name: /RTC-1043.*Cypress Video/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("heading", { name: "Recording failures and pilot" })).toBeVisible();
+  await expect(page.getByText("Live analysis", { exact: true })).toBeVisible();
+  await expect(page.getByText("Check the recording failures and follow up on the pilot.")).toBeVisible();
+  await expect(page.locator("blockquote")).toHaveText("launch a pilot next month");
+  await expect(page.locator(".message mark")).toHaveText("launch a pilot next month");
+  await expect(page.locator(".message p")).toHaveJSProperty("textContent", body);
+  await expect(queue.getByRole("button")).toHaveCount(before.length + 1);
+  const hasOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+  expect(hasOverflow).toBe(false);
+  await page.screenshot({ path: testInfo.outputPath("live-letter.png"), fullPage: true });
+});
