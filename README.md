@@ -1,16 +1,41 @@
 # RTC Support-to-Sales Inbox
 
-A planned portfolio project for technical support teams at real-time communications (RTC) providers. It identifies pilot, migration, and expansion signals in support tickets so a solutions engineer can follow up while support continues troubleshooting.
+A demo workbench for technical support teams at real-time communications (RTC) providers. A support agent can keep troubleshooting a ticket while handing a migration or pilot opportunity to a solutions engineer.
 
-## Example workflow
+## Run the demo locally
 
-A fictional customer reports intermittent call recording failures and mentions a migration pilot planned for next month. The inbox shows the original ticket, the quoted evidence for the pilot, and the open technical questions. A support agent reviews the suggestion and assigns a follow-up to a solutions engineer. The support ticket stays open.
+Use Node.js 20.9 or newer and Python 3.12. Run these commands from the repository root in PowerShell.
 
-## Development milestones
+```powershell
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -r api/requirements.txt
+npm.cmd ci
+```
 
-- [ ] Show three fictional tickets in an English workbench. Read them through FastAPI and walk through the handoff in the browser.
-- [ ] Analyze a new ticket and check each evidence quote against the original text.
-- [ ] Save the ticket and confirmed handoff in PostgreSQL. Repeated confirmation creates one task per ticket.
-- [ ] Verify the workflow with new tickets and record a short demo.
+Start FastAPI in one terminal.
 
-The planned stack is Next.js with React and TypeScript, Python with FastAPI and Pydantic, and PostgreSQL.
+```powershell
+.venv/Scripts/python.exe -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+Start Next.js in a second terminal.
+
+```powershell
+npm.cmd run dev
+```
+
+Open [the workbench](http://127.0.0.1:3000). On macOS or Linux, use `.venv/bin/python` and `npm` in place of the PowerShell commands.
+
+## Walk through the three tickets
+
+1. Open **RTC-1042**. Check the original recording report and the evidence for a migration pilot. Select a solutions engineer and confirm the handoff. The support ticket remains open.
+2. Open **RTC-1041**. Review the Flutter token troubleshooting steps.
+3. Open **RTC-1040**. Review what to ask about the recording use case and launch date.
+
+FastAPI serves three fictional tickets with prepared triage results. Handoffs are shared by browsers using the same API process and reset when that process stops. No model key or database is needed.
+
+## Verify the workbench
+
+With Chrome installed, run `npm run verify` from the repository root. Playwright starts a fresh API and workbench on ports 8100 and 3100. It exercises the three tickets against the real API. Run `npm run build` to check the production build.
+
+The next milestone adds model analysis for new tickets. A later milestone stores tickets and confirmed handoffs in PostgreSQL.

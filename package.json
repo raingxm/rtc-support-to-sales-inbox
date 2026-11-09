@@ -1,0 +1,32 @@
+{
+  "name": "rtc-support-to-sales-inbox",
+  "version": "1.0.0",
+  "description": "A planned portfolio project for technical support teams at real-time communications (RTC) providers. It identifies pilot, migration, and expansion signals in support tickets so a solutions engineer can follow up while support continues troubleshooting.",
+  "scripts": {
+    "dev": "next dev web --hostname 127.0.0.1",
+    "build": "next build web",
+    "start": "next start web --hostname 127.0.0.1",
+    "typecheck": "tsc -p web --noEmit",
+    "verify": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raingxm/rtc-support-to-sales-inbox.git"
+  },
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "lucide-react": "^1.70.0",
+    "next": "^16.4.5",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}
