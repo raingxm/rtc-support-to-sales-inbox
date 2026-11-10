@@ -38,11 +38,13 @@ FastAPI serves three fictional tickets with prepared triage results. You can rev
 
 Set `OPENAI_API_KEY` in the terminal that runs FastAPI, then restart the API. Set `OPENAI_MODEL` to override the default model, `gpt-5.4-mini`.
 
+To use Quanzil, set `OPENAI_BASE_URL=https://quanzil.com/v1` and use a Quanzil key and a model that supports Responses API structured output. The base URL defaults to `https://api.openai.com/v1`. If you keep these settings in `.env`, load the file into the backend terminal before starting FastAPI.
+
 1. Open **New letter**. Enter the customer name and paste a fictional customer message.
 2. Click **Analyze letter**. The workbench selects the new ticket and shows its triage under **Live analysis**.
 3. For an opportunity, compare each quote with the highlighted text in the customer message.
 
-The API sends the message body to OpenAI for analysis. It adds the ticket only after every evidence quote matches the original text.
+The API sends the message body to the configured model provider for analysis. It adds the ticket only after every evidence quote matches the original text.
 
 ## Verify the workbench
 

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from http.client import HTTPException, HTTPSConnection
+from urllib.parse import urlsplit
 
 from api.inbox import AnalysisFailed, _Draft
 
@@ -19,9 +20,11 @@ Return an empty evidence array for support and clarify."""
 
 
 class _OpenAIAnalyzer:
-    def __init__(self, key: str, model: str) -> None:
+    def __init__(self, key: str, model: str, authority: str, responses_path: str) -> None:
         self._key = key
         self._model = model
+        self._authority = authority
+        self._responses_path = responses_path
 
     async def draft(self, body: str) -> _Draft:
         return await asyncio.to_thread(self._request_draft, body)
@@ -42,11 +45,11 @@ class _OpenAIAnalyzer:
                 },
             },
         }
-        connection = HTTPSConnection("api.openai.com", timeout=30)
+        connection = HTTPSConnection(self._authority, timeout=30)
         try:
             connection.request(
                 "POST",
-                "/v1/responses",
+                self._responses_path,
                 body=json.dumps(request).encode("utf-8"),
                 headers={"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"},
             )
@@ -76,4 +79,15 @@ def configured_analyzer() -> _OpenAIAnalyzer | None:
     if not key:
         return None
     model = os.getenv("OPENAI_MODEL", "").strip() or "gpt-5.4-mini"
-    return _OpenAIAnalyzer(key, model)
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or "https://api.openai.com/v1"
+    endpoint = urlsplit(base_url)
+    if (
+        endpoint.scheme != "https"
+        or not endpoint.hostname
+        or endpoint.username is not None
+        or endpoint.query
+        or endpoint.fragment
+        or endpoint.port == 0
+    ):
+        raise ValueError("OPENAI_BASE_URL must be an HTTPS base URL without credentials, a query, or a fragment.")
+    return _OpenAIAnalyzer(key, model, endpoint.netloc, f"{endpoint.path.rstrip('/')}/responses")
