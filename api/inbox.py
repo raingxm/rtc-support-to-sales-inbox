@@ -1,3 +1,5 @@
+import asyncio
+from threading import Lock
 from typing import Annotated, Literal, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -85,23 +87,33 @@ class Letter(BaseModel):
         return self
 
 
-class Ticket(BaseModel):
+class TicketContent(BaseModel):
     model_config = ConfigDict(frozen=True)
-    id: str
     title: str = Field(min_length=1)
     customer: str = Field(min_length=1)
     body: str
-    origin: Literal["sample", "live"]
-    status: Literal["open"] = "open"
     triage: Triage
-    handoff: Handoff | None = None
 
     @model_validator(mode="after")
-    def check_evidence_bounds(self) -> "Ticket":
+    def check_evidence_bounds(self) -> "TicketContent":
         if isinstance(self.triage, MixedTriage):
             for span in self.triage.evidence:
                 quote_text(self.body, span)
         return self
+
+
+class Ticket(TicketContent):
+    id: str
+    origin: Literal["sample", "live"]
+    status: Literal["open"] = "open"
+    handoff: Handoff | None = None
+
+    def assign_handoff(self, owner: Owner) -> "Ticket":
+        if not isinstance(self.triage, MixedTriage):
+            raise HandoffRejected
+        if self.handoff is not None:
+            return self
+        return self.model_copy(update={"handoff": Handoff(owner=owner)})
 
 
 class _SampleTriage(_TriageText):
@@ -171,60 +183,97 @@ def _check(body: str, draft: _Draft) -> Triage:
     )
 
 
-class Inbox:
-    def __init__(self, analyzer: _Analyzer | None = None) -> None:
-        self._analyzer = analyzer
+class TicketStore(Protocol):
+    def seed(self, samples: Sequence[Ticket]) -> None: ...
+    def list_tickets(self) -> list[Ticket]: ...
+    def get(self, ticket_id: str) -> Ticket | None: ...
+    def append(self, content: TicketContent) -> Ticket: ...
+    def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket: ...
+
+
+class _MemoryTicketStore:
+    def __init__(self) -> None:
         self._tickets: dict[str, Ticket] = {}
+        self._lock = Lock()
+
+    def seed(self, samples: Sequence[Ticket]) -> None:
+        with self._lock:
+            for sample in samples:
+                self._tickets.setdefault(sample.id, sample)
+
+    def list_tickets(self) -> list[Ticket]:
+        with self._lock:
+            return list(self._tickets.values())
+
+    def get(self, ticket_id: str) -> Ticket | None:
+        with self._lock:
+            return self._tickets.get(ticket_id)
+
+    def append(self, content: TicketContent) -> Ticket:
+        with self._lock:
+            suffix = max((int(ticket_id.removeprefix("RTC-")) for ticket_id in self._tickets), default=1042)
+            ticket = Ticket(id=f"RTC-{suffix + 1}", origin="live", **content.model_dump())
+            self._tickets[ticket.id] = ticket
+            return ticket
+
+    def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None:
+                raise TicketNotFound(ticket_id)
+            updated = ticket.assign_handoff(owner)
+            self._tickets[ticket_id] = updated
+            return updated
+
+
+class Inbox:
+    def __init__(self, analyzer: _Analyzer | None = None, *, store: TicketStore | None = None) -> None:
+        self._analyzer = analyzer
+        self._store = store if store is not None else _MemoryTicketStore()
 
     @classmethod
-    def open(cls, samples: Sequence[_SampleRecord], analyzer: _Analyzer | None = None) -> "Inbox":
-        inbox = cls(analyzer)
+    def open(
+        cls,
+        samples: Sequence[_SampleRecord],
+        analyzer: _Analyzer | None = None,
+        *,
+        store: TicketStore | None = None,
+    ) -> "Inbox":
+        inbox = cls(analyzer, store=store)
+        tickets = []
         for sample in samples:
             draft = _Draft(title=sample.title, **sample.triage.model_dump())
-            inbox._tickets[sample.id] = Ticket(
+            tickets.append(Ticket(
                 id=sample.id,
                 title=sample.title,
                 customer=sample.customer,
                 body=sample.body,
                 origin="sample",
                 triage=_check(sample.body, draft),
-            )
+            ))
+        inbox._store.seed(tickets)
         return inbox
 
     def list_tickets(self) -> list[Ticket]:
-        return list(self._tickets.values())
+        return self._store.list_tickets()
 
     def get(self, ticket_id: str) -> Ticket | None:
-        return self._tickets.get(ticket_id)
+        return self._store.get(ticket_id)
 
     async def submit(self, letter: Letter) -> Ticket:
         if self._analyzer is None:
             raise AnalysisUnavailable
         draft = await self._analyzer.draft(letter.body)
-        triage = _check(letter.body, draft)
-        suffix = max((int(ticket_id.removeprefix("RTC-")) for ticket_id in self._tickets), default=1042)
-        ticket = Ticket(
-            id=f"RTC-{suffix + 1}",
+        content = TicketContent(
             title=draft.title,
             customer=letter.customer,
             body=letter.body,
-            origin="live",
-            triage=triage,
+            triage=_check(letter.body, draft),
         )
-        self._tickets[ticket.id] = ticket
-        return ticket
+        return await asyncio.to_thread(self._store.append, content)
 
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
-        ticket = self.get(ticket_id)
-        if ticket is None:
-            raise TicketNotFound(ticket_id)
-        if not isinstance(ticket.triage, MixedTriage):
-            raise HandoffRejected
-        if ticket.handoff is not None:
-            return ticket
-        updated = ticket.model_copy(update={"handoff": Handoff(owner=owner)})
-        self._tickets[ticket_id] = updated
-        return updated
+        return self._store.confirm_handoff(ticket_id, owner)
 
 
 SAMPLES = (
