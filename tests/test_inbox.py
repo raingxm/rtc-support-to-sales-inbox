@@ -73,22 +73,29 @@ class OpenAIResponseTest(IsolatedAsyncioTestCase):
                 {"type": "message", "content": [{"type": "output_text", "text": json.dumps(draft)}]},
             ],
         }
-        with (
-            patch.dict("os.environ", {"OPENAI_API_KEY": "test-credential", "OPENAI_MODEL": "test-model"}),
-            patch("api.model_analyzer.HTTPSConnection") as connect,
-        ):
-            connection = connect.return_value
-            connection.getresponse.return_value = Response(json.dumps(envelope).encode("utf-8"))
-            inbox = Inbox.open(SAMPLES, analyzer=configured_analyzer())
-            ticket = await inbox.submit(Letter(customer="Harborline Labs", body=body))
+        for base_url, host in (("", "api.openai.com"), ("https://quanzil.com/v1/", "quanzil.com")):
+            with (
+                self.subTest(base_url=base_url),
+                patch.dict("os.environ", {
+                    "OPENAI_API_KEY": "test-credential",
+                    "OPENAI_MODEL": "test-model",
+                    "OPENAI_BASE_URL": base_url,
+                }, clear=True),
+                patch("api.model_analyzer.HTTPSConnection") as connect,
+            ):
+                connection = connect.return_value
+                connection.getresponse.return_value = Response(json.dumps(envelope).encode("utf-8"))
+                inbox = Inbox.open(SAMPLES, analyzer=configured_analyzer())
+                ticket = await inbox.submit(Letter(customer="Harborline Labs", body=body))
 
-        request = connection.request.call_args
-        self.assertEqual(request.args, ("POST", "/v1/responses"))
-        payload = json.loads(request.kwargs["body"])
-        self.assertEqual(payload["model"], "test-model")
-        self.assertEqual(payload["input"], body)
-        self.assertIs(payload["store"], False)
-        self.assertEqual(ticket.id, "RTC-1043")
-        self.assertEqual(ticket.title, "Recording issue and pilot")
-        self.assertEqual(ticket.body, body)
-        self.assertEqual(quote_text(ticket.body, ticket.triage.evidence[0]), "We want a pilot next month.")
+                self.assertEqual(connect.call_args.args, (host,))
+                request = connection.request.call_args
+                self.assertEqual(request.args, ("POST", "/v1/responses"))
+                payload = json.loads(request.kwargs["body"])
+                self.assertEqual(payload["model"], "test-model")
+                self.assertEqual(payload["input"], body)
+                self.assertIs(payload["store"], False)
+                self.assertEqual(ticket.id, "RTC-1043")
+                self.assertEqual(ticket.title, "Recording issue and pilot")
+                self.assertEqual(ticket.body, body)
+                self.assertEqual(quote_text(ticket.body, ticket.triage.evidence[0]), "We want a pilot next month.")
