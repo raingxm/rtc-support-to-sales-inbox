@@ -67,6 +67,20 @@ class PostgresInboxTest(IsolatedAsyncioTestCase):
             await reopened.submit(Letter(customer="Cypress Video", body="Recording failed."))
         self.assertEqual(len(reopened.list_tickets()), 4)
 
+    async def test_reopening_keeps_a_later_customer_message(self) -> None:
+        inbox = self.open_inbox()
+        ticket = await inbox.submit(Letter(customer="Cypress Video", body=_PILOT))
+        updated = await inbox.append_customer_message(ticket.id, "The recordings are still failing.")
+
+        reopened = self.open_inbox()
+        stored = reopened.get(ticket.id)
+        self.assertEqual(stored, updated)
+        self.assertEqual([message.body for message in stored.messages], [
+            _PILOT,
+            "The recordings are still failing.",
+        ])
+        self.assertEqual(stored.triage.kind, "mixed")
+
     async def test_concurrent_confirmations_store_one_owner(self) -> None:
         first_inbox = self.open_inbox()
         second_inbox = self.open_inbox()

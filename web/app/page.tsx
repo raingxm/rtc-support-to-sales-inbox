@@ -1,10 +1,11 @@
 "use client";
 
 import {
-  Activity, ArrowRight, AudioLines, Check, ChevronRight, CircleHelp,
-  Headset, Inbox, Radio, Route, ScanLine, Wrench,
+  Activity, ArrowRight, Check, ChevronRight, CircleHelp,
+  Headset, Inbox, Route, ScanLine, Wrench,
 } from "lucide-react";
 import { type FormEvent, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
+import { DeskFrame } from "./frame";
 import {
   createHandoff, LetterSubmissionError, listTickets, owners, submitLetter,
   type EvidenceSpan, type Owner, type Ticket,
@@ -222,7 +223,6 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
   const { triage } = ticket;
   const isMixed = triage.kind === "mixed";
   const isClarify = triage.kind === "clarify";
-  const characters = Array.from(ticket.body);
 
   return (
     <article className="detail" aria-labelledby="ticket-heading">
@@ -234,9 +234,18 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
           <span className="open-label"><i />{ticket.status === "open" && "Support open"}</span>
         </div>
         <h2 id="ticket-heading" ref={headingRef} tabIndex={-1}>{ticket.title}</h2>
-        <div className="message">
-          <h3 className="eyebrow" id="message-heading">Customer message</h3>
-          <p>{isMixed ? highlightMessage(characters, triage.evidence) : ticket.body}</p>
+        <div className="conversation">
+          {ticket.messages.map((message, index) => {
+            const evidence = isMixed ? triage.evidence.filter((span) => span.message === index) : [];
+            return (
+              <div className="message" key={index}>
+                <h3 className="eyebrow" id={index === 0 ? "message-heading" : undefined}>
+                  {ticket.messages.length === 1 ? "Customer message" : `Customer message ${index + 1}`}
+                </h3>
+                <p>{evidence.length > 0 ? highlightMessage(Array.from(message.body), evidence) : message.body}</p>
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -265,8 +274,10 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
             <section className="track track-opportunity" aria-labelledby="opportunity-heading">
               <p className="track-tag"><Route size={15} /> Opportunity track</p>
               <h4 id="opportunity-heading">Commercial follow-up</h4>
-              {triage.evidence.map(({ start, end }) => (
-                <blockquote key={`${start}:${end}`}>{characters.slice(start, end).join("")}</blockquote>
+              {triage.evidence.map(({ message, start, end }) => (
+                <blockquote key={`${message}:${start}:${end}`}>
+                  {Array.from(ticket.messages[message]?.body ?? "").slice(start, end).join("")}
+                </blockquote>
               ))}
               {triage.questions.length > 0 && (
                 <><p className="track-label">Questions for the handoff</p>
@@ -340,19 +351,7 @@ export default function InboxPage() {
   const selected = tickets.find((ticket) => ticket.id === selectedId) ?? tickets[0];
 
   return (
-    <>
-      <header className="topbar">
-        <div className="frame topbar-content">
-          <div className="brand">
-            <span className="brand-icon"><AudioLines size={20} /></span>
-            <strong>Relay Desk</strong>
-            <span className="brand-divider" />
-            <span className="brand-section">RTC workspace</span>
-          </div>
-          <span className="demo"><Radio size={14} /> Demo workspace</span>
-        </div>
-      </header>
-
+    <DeskFrame section="RTC workspace">
       <main className="frame workspace">
         <div className="page-intro">
           <div>
@@ -382,6 +381,6 @@ export default function InboxPage() {
           </div>
         )}
       </main>
-    </>
+    </DeskFrame>
   );
 }

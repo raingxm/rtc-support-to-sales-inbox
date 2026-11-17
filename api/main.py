@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from api.inbox import (
     AnalysisFailed,
     AnalysisUnavailable,
+    CustomerMessage,
     Handoff,
     HandoffRejected,
     Inbox,
@@ -55,6 +56,28 @@ def create_app(inbox: Inbox | None = None) -> FastAPI:
     async def submit_letter(letter: Letter, active_inbox: InboxDependency) -> Ticket:
         try:
             return await active_inbox.submit(letter)
+        except AnalysisUnavailable:
+            raise HTTPException(status_code=503, detail="Letter analysis is not configured.") from None
+        except AnalysisFailed:
+            raise HTTPException(status_code=502, detail="The model could not analyze this letter.") from None
+
+    @app.get("/tickets/{ticket_id}")
+    def read_ticket(ticket_id: str, active_inbox: InboxDependency) -> Ticket:
+        ticket = active_inbox.get(ticket_id)
+        if ticket is None:
+            raise HTTPException(status_code=404, detail="Ticket not found.")
+        return ticket
+
+    @app.post("/tickets/{ticket_id}/messages")
+    async def append_customer_message(
+        ticket_id: str,
+        message: CustomerMessage,
+        active_inbox: InboxDependency,
+    ) -> Ticket:
+        try:
+            return await active_inbox.append_customer_message(ticket_id, message.body)
+        except TicketNotFound:
+            raise HTTPException(status_code=404, detail="Ticket not found.") from None
         except AnalysisUnavailable:
             raise HTTPException(status_code=503, detail="Letter analysis is not configured.") from None
         except AnalysisFailed:

@@ -38,9 +38,10 @@ class HandoffRejected(Exception):
 
 
 class Span(BaseModel):
-    """Half-open Unicode code point offsets into the original body."""
+    """Half-open Unicode code point offsets into one customer message."""
 
     model_config = ConfigDict(frozen=True)
+    message: int = Field(default=0, ge=0)
     start: int = Field(ge=0)
     end: int = Field(gt=0)
 
@@ -87,18 +88,38 @@ class Letter(BaseModel):
         return self
 
 
+class CustomerMessage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    body: str
+
+    @model_validator(mode="after")
+    def check_content(self) -> "CustomerMessage":
+        if not self.body.strip():
+            raise ValueError("A customer message is required.")
+        return self
+
+
 class TicketContent(BaseModel):
     model_config = ConfigDict(frozen=True)
     title: str = Field(min_length=1)
     customer: str = Field(min_length=1)
-    body: str
+    messages: tuple[CustomerMessage, ...] = Field(min_length=1)
     triage: Triage
+
+    @model_validator(mode="before")
+    @classmethod
+    def letter_body_is_one_message(cls, data: object) -> object:
+        if isinstance(data, dict) and "messages" not in data and "body" in data:
+            return {**data, "messages": [{"body": data["body"]}]}
+        return data
 
     @model_validator(mode="after")
     def check_evidence_bounds(self) -> "TicketContent":
         if isinstance(self.triage, MixedTriage):
             for span in self.triage.evidence:
-                quote_text(self.body, span)
+                if span.message >= len(self.messages):
+                    raise ValueError("Evidence span does not match a customer message.")
+                quote_text(self.messages[span.message].body, span)
         return self
 
 
@@ -145,22 +166,29 @@ def quote_text(body: str, span: Span) -> str:
     return body[span.start : span.end]
 
 
-def _locate(body: str, quote: str) -> Span:
+def _transcript(messages: Sequence[CustomerMessage]) -> str:
+    if len(messages) == 1:
+        return messages[0].body
+    return "\n\n".join(message.body for message in messages)
+
+
+def _locate(messages: Sequence[CustomerMessage], quote: str) -> Span:
     if not quote:
         raise QuoteRejected(quote, "empty-quote")
-    start = body.find(quote)
-    if start < 0:
-        raise QuoteRejected(quote, "not-in-letter")
-    return Span(start=start, end=start + len(quote))
+    for index, message in enumerate(messages):
+        start = message.body.find(quote)
+        if start >= 0:
+            return Span(message=index, start=start, end=start + len(quote))
+    raise QuoteRejected(quote, "not-in-letter")
 
 
-def _check(body: str, draft: _Draft) -> Triage:
+def _check(messages: Sequence[CustomerMessage], draft: _Draft) -> Triage:
     seen: set[str] = set()
     spans: list[Span] = []
     for quote in draft.evidence:
         if quote in seen:
             raise QuoteRejected(quote, "duplicate-quote")
-        spans.append(_locate(body, quote))
+        spans.append(_locate(messages, quote))
         seen.add(quote)
 
     if draft.kind == "mixed":
@@ -188,6 +216,7 @@ class TicketStore(Protocol):
     def list_tickets(self) -> list[Ticket]: ...
     def get(self, ticket_id: str) -> Ticket | None: ...
     def append(self, content: TicketContent) -> Ticket: ...
+    def save(self, ticket: Ticket) -> Ticket: ...
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket: ...
 
 
@@ -213,6 +242,13 @@ class _MemoryTicketStore:
         with self._lock:
             suffix = max((int(ticket_id.removeprefix("RTC-")) for ticket_id in self._tickets), default=1042)
             ticket = Ticket(id=f"RTC-{suffix + 1}", origin="live", **content.model_dump())
+            self._tickets[ticket.id] = ticket
+            return ticket
+
+    def save(self, ticket: Ticket) -> Ticket:
+        with self._lock:
+            if ticket.id not in self._tickets:
+                raise TicketNotFound(ticket.id)
             self._tickets[ticket.id] = ticket
             return ticket
 
@@ -242,14 +278,15 @@ class Inbox:
         inbox = cls(analyzer, store=store)
         tickets = []
         for sample in samples:
+            messages = (CustomerMessage(body=sample.body),)
             draft = _Draft(title=sample.title, **sample.triage.model_dump())
             tickets.append(Ticket(
                 id=sample.id,
                 title=sample.title,
                 customer=sample.customer,
-                body=sample.body,
+                messages=messages,
                 origin="sample",
-                triage=_check(sample.body, draft),
+                triage=_check(messages, draft),
             ))
         inbox._store.seed(tickets)
         return inbox
@@ -263,14 +300,30 @@ class Inbox:
     async def submit(self, letter: Letter) -> Ticket:
         if self._analyzer is None:
             raise AnalysisUnavailable
-        draft = await self._analyzer.draft(letter.body)
+        messages = (CustomerMessage(body=letter.body),)
+        draft = await self._analyzer.draft(_transcript(messages))
         content = TicketContent(
             title=draft.title,
             customer=letter.customer,
-            body=letter.body,
-            triage=_check(letter.body, draft),
+            messages=messages,
+            triage=_check(messages, draft),
         )
         return await asyncio.to_thread(self._store.append, content)
+
+    async def append_customer_message(self, ticket_id: str, body: str) -> Ticket:
+        message = CustomerMessage(body=body)
+        current = await asyncio.to_thread(self._store.get, ticket_id)
+        if current is None:
+            raise TicketNotFound(ticket_id)
+        messages = (*current.messages, message)
+        triage = current.triage
+        if current.handoff is None:
+            if self._analyzer is None:
+                raise AnalysisUnavailable
+            draft = await self._analyzer.draft(_transcript(messages))
+            triage = _check(messages, draft)
+        updated = current.model_copy(update={"messages": messages, "triage": triage})
+        return await asyncio.to_thread(self._store.save, updated)
 
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
         return self._store.confirm_handoff(ticket_id, owner)

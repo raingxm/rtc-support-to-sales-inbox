@@ -90,6 +90,19 @@ class PostgresTicketStore:
             assert row is not None
             return _ticket(row)
 
+    def save(self, ticket: Ticket) -> Ticket:
+        content = Json(ticket.model_dump(mode="json", include=set(TicketContent.model_fields)))
+        with self._connect() as connection:
+            updated = connection.execute(
+                "UPDATE rtc_tickets SET content = %s WHERE id = %s",
+                (content, ticket.id),
+            )
+            if updated.rowcount != 1:
+                raise TicketNotFound(ticket.id)
+            row = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket.id,)).fetchone()
+        assert row is not None
+        return _ticket(row)
+
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
