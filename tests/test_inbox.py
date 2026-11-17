@@ -1,3 +1,4 @@
+import asyncio
 import json
 from io import BytesIO
 from unittest import IsolatedAsyncioTestCase, TestCase
@@ -168,6 +169,53 @@ class AppendedMessageTest(IsolatedAsyncioTestCase):
             opened.id,
             "My join call returns an invalid token error.",
         )
+
+        self.assertEqual([message.body for message in updated.messages], [
+            "We want to launch a pilot next month.",
+            "My join call returns an invalid token error.",
+        ])
+        self.assertEqual(updated.handoff, assigned.handoff)
+        self.assertEqual(updated.triage, assigned.triage)
+
+    async def test_a_handoff_confirmed_during_analysis_stays_on_the_ticket(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    started.set()
+                    await release.wait()
+                    return _Draft(
+                        title="Join help",
+                        kind="support",
+                        summary="Troubleshoot the token.",
+                        support_steps=["Check the token expiry."],
+                        evidence=[],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Pilot",
+                    kind="mixed",
+                    summary="Route the pilot.",
+                    support_steps=[],
+                    evidence=["launch a pilot next month"],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Harborline Labs",
+            body="We want to launch a pilot next month.",
+        ))
+        follow_up = asyncio.create_task(inbox.append_customer_message(
+            opened.id,
+            "My join call returns an invalid token error.",
+        ))
+        await started.wait()
+        assigned = await asyncio.to_thread(inbox.confirm_handoff, opened.id, "Maya Chen")
+        release.set()
+        updated = await follow_up
 
         self.assertEqual([message.body for message in updated.messages], [
             "We want to launch a pilot next month.",

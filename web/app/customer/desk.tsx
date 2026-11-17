@@ -145,7 +145,14 @@ export function CustomerTicket({ ticketId }: { ticketId: string }) {
         <div className="page-intro">
           <p className="eyebrow">Customer</p>
           <h1>{ticket ? ticket.title : "Your ticket"}</h1>
-          {ticket && <p>{ticket.customer} · {ticket.id}. Your name is only shown on this ticket.</p>}
+          {ticket && (
+            <p className="ticket-meta">
+              <span className="mono">{ticket.id}</span>
+              <span className="separator" />
+              <span>{ticket.customer}</span>
+              <span>Your name is only shown on this ticket.</span>
+            </p>
+          )}
         </div>
 
         {view.status === "loading" && <div className="notice" role="status">Loading your ticket…</div>}

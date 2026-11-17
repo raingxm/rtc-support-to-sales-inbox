@@ -216,7 +216,9 @@ class TicketStore(Protocol):
     def list_tickets(self) -> list[Ticket]: ...
     def get(self, ticket_id: str) -> Ticket | None: ...
     def append(self, content: TicketContent) -> Ticket: ...
-    def save(self, ticket: Ticket) -> Ticket: ...
+    def append_message(
+        self, ticket_id: str, message: CustomerMessage, triage: Triage | None, prior_count: int,
+    ) -> Ticket: ...
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket: ...
 
 
@@ -245,12 +247,20 @@ class _MemoryTicketStore:
             self._tickets[ticket.id] = ticket
             return ticket
 
-    def save(self, ticket: Ticket) -> Ticket:
+    def append_message(
+        self, ticket_id: str, message: CustomerMessage, triage: Triage | None, prior_count: int,
+    ) -> Ticket:
         with self._lock:
-            if ticket.id not in self._tickets:
-                raise TicketNotFound(ticket.id)
-            self._tickets[ticket.id] = ticket
-            return ticket
+            latest = self._tickets.get(ticket_id)
+            if latest is None:
+                raise TicketNotFound(ticket_id)
+            use_new_triage = latest.handoff is None and triage is not None and len(latest.messages) == prior_count
+            updated = latest.model_copy(update={
+                "messages": (*latest.messages, message),
+                "triage": triage if use_new_triage else latest.triage,
+            })
+            self._tickets[ticket_id] = updated
+            return updated
 
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
         with self._lock:
@@ -315,15 +325,16 @@ class Inbox:
         current = await asyncio.to_thread(self._store.get, ticket_id)
         if current is None:
             raise TicketNotFound(ticket_id)
-        messages = (*current.messages, message)
-        triage = current.triage
+        triage = None
         if current.handoff is None:
             if self._analyzer is None:
                 raise AnalysisUnavailable
+            messages = (*current.messages, message)
             draft = await self._analyzer.draft(_transcript(messages))
             triage = _check(messages, draft)
-        updated = current.model_copy(update={"messages": messages, "triage": triage})
-        return await asyncio.to_thread(self._store.save, updated)
+        return await asyncio.to_thread(
+            self._store.append_message, ticket_id, message, triage, len(current.messages),
+        )
 
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
         return self._store.confirm_handoff(ticket_id, owner)
