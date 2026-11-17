@@ -85,3 +85,34 @@ test("checks a new letter against the source before adding it to the queue", asy
   expect(hasOverflow).toBe(false);
   await page.screenshot({ path: testInfo.outputPath("live-letter.png"), fullPage: true });
 });
+
+test("customer and support show the same conversation", async ({ page }) => {
+  const first = "We want to launch a pilot next month.";
+  const second = "My join call returns an invalid token error.";
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/customer");
+  await expect(page.getByLabel(/password/i)).toHaveCount(0);
+  await page.getByRole("textbox", { name: "Your name" }).fill("Lumen Field");
+  await page.getByRole("textbox", { name: "Your message" }).fill(first);
+  await page.getByRole("button", { name: "Open ticket" }).click();
+
+  await expect(page).toHaveURL(/\/customer\/RTC-/);
+  await expect(page.getByLabel(/password/i)).toHaveCount(0);
+  await expect(page.getByRole("textbox", { name: "Your name" })).toHaveCount(0);
+  await expect(page.locator(".message p")).toHaveText([first]);
+  await expect(page.locator("main")).toContainText("Lumen Field");
+
+  await page.getByRole("textbox", { name: "Add a message" }).fill(second);
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".message p")).toHaveText([first, second]);
+
+  const support = await page.context().newPage();
+  await support.setViewportSize({ width: 390, height: 844 });
+  await support.goto("/");
+  await support.getByRole("button", { name: /Lumen Field/ }).click();
+  await expect(support.locator(".detail")).toContainText("Lumen Field");
+  await expect(support.locator(".message p")).toHaveText([first, second]);
+  const hasOverflow = await support.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+  expect(hasOverflow).toBe(false);
+});

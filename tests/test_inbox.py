@@ -1,9 +1,12 @@
+import asyncio
 import json
 from io import BytesIO
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
-from api.inbox import Inbox, Letter, QuoteRejected, SAMPLES, _Draft, quote_text
+from pydantic import ValidationError
+
+from api.inbox import Inbox, Letter, QuoteRejected, SAMPLES, Ticket, TicketNotFound, _Draft, quote_text
 from api.model_analyzer import configured_analyzer
 
 
@@ -20,7 +23,7 @@ class SampleEvidenceTest(TestCase):
             [(53, 88), (101, 126)],
         )
         self.assertEqual(
-            [quote_text(ticket.body, span) for span in ticket.triage.evidence],
+            [quote_text(ticket.messages[span.message].body, span) for span in ticket.triage.evidence],
             ["evaluating a move from Twilio Video", "launch a pilot next month"],
         )
 
@@ -46,10 +49,255 @@ class NewLetterTest(IsolatedAsyncioTestCase):
         original = samples[0]
 
         with self.assertRaises(QuoteRejected) as failure:
-            await inbox.submit(Letter(customer=original.customer, body=original.body))
+            await inbox.submit(Letter(customer=original.customer, body=original.messages[0].body))
 
         self.assertEqual(failure.exception.reason, "not-in-letter")
         self.assertEqual(inbox.list_tickets(), samples)
+
+
+class AppendedMessageTest(IsolatedAsyncioTestCase):
+    async def test_a_later_customer_message_stays_on_the_ticket_and_can_change_unconfirmed_triage(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "launch a pilot next month" in body:
+                    return _Draft(
+                        title="Pilot follow-up",
+                        kind="mixed",
+                        summary="Route the pilot.",
+                        support_steps=["Ask for the failure time."],
+                        evidence=["launch a pilot next month"],
+                        questions=["How many calls?"],
+                    )
+                return _Draft(
+                    title="Join help",
+                    kind="support",
+                    summary="Troubleshoot the join error.",
+                    support_steps=["Check the token expiry."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Northwind Studio",
+            body="My join call returns an invalid token error.",
+        ))
+
+        updated = await inbox.append_customer_message(
+            opened.id,
+            "We want to launch a pilot next month.",
+        )
+
+        self.assertEqual(updated.id, opened.id)
+        self.assertEqual(updated.customer, "Northwind Studio")
+        self.assertEqual([message.body for message in updated.messages], [
+            "My join call returns an invalid token error.",
+            "We want to launch a pilot next month.",
+        ])
+        self.assertEqual(updated.triage.kind, "mixed")
+        self.assertEqual(updated.triage.summary, "Route the pilot.")
+        evidence = updated.triage.evidence[0]
+        self.assertEqual(
+            quote_text(updated.messages[evidence.message].body, evidence),
+            "launch a pilot next month",
+        )
+        self.assertEqual(inbox.get(opened.id), updated)
+        self.assertEqual(len(inbox.list_tickets()), 4)
+
+    async def test_a_quote_missing_from_the_customer_messages_leaves_the_ticket_unchanged(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "follow-up" in body:
+                    return _Draft(
+                        title="Missing quote",
+                        kind="mixed",
+                        summary="This quote is not in the conversation.",
+                        support_steps=[],
+                        evidence=["a sentence the customer did not write"],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Join help",
+                    kind="support",
+                    summary="Troubleshoot the join error.",
+                    support_steps=["Check the token expiry."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Northwind Studio",
+            body="My join call returns an invalid token error.",
+        ))
+
+        with self.assertRaises(QuoteRejected) as failure:
+            await inbox.append_customer_message(opened.id, "This follow-up still has no pilot.")
+
+        self.assertEqual(failure.exception.reason, "not-in-letter")
+        self.assertEqual(inbox.get(opened.id), opened)
+
+    async def test_a_later_message_keeps_a_confirmed_handoff_and_its_triage(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "invalid token" in body:
+                    return _Draft(
+                        title="Join help",
+                        kind="support",
+                        summary="Troubleshoot the token.",
+                        support_steps=["Check the token expiry."],
+                        evidence=[],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Pilot",
+                    kind="mixed",
+                    summary="Route the pilot.",
+                    support_steps=[],
+                    evidence=["launch a pilot next month"],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Harborline Labs",
+            body="We want to launch a pilot next month.",
+        ))
+        assigned = inbox.confirm_handoff(opened.id, "Maya Chen")
+
+        updated = await inbox.append_customer_message(
+            opened.id,
+            "My join call returns an invalid token error.",
+        )
+
+        self.assertEqual([message.body for message in updated.messages], [
+            "We want to launch a pilot next month.",
+            "My join call returns an invalid token error.",
+        ])
+        self.assertEqual(updated.handoff, assigned.handoff)
+        self.assertEqual(updated.triage, assigned.triage)
+
+    async def test_a_handoff_confirmed_during_analysis_stays_on_the_ticket(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    started.set()
+                    await release.wait()
+                    return _Draft(
+                        title="Join help",
+                        kind="support",
+                        summary="Troubleshoot the token.",
+                        support_steps=["Check the token expiry."],
+                        evidence=[],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Pilot",
+                    kind="mixed",
+                    summary="Route the pilot.",
+                    support_steps=[],
+                    evidence=["launch a pilot next month"],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Harborline Labs",
+            body="We want to launch a pilot next month.",
+        ))
+        follow_up = asyncio.create_task(inbox.append_customer_message(
+            opened.id,
+            "My join call returns an invalid token error.",
+        ))
+        await started.wait()
+        assigned = await asyncio.to_thread(inbox.confirm_handoff, opened.id, "Maya Chen")
+        release.set()
+        updated = await follow_up
+
+        self.assertEqual([message.body for message in updated.messages], [
+            "We want to launch a pilot next month.",
+            "My join call returns an invalid token error.",
+        ])
+        self.assertEqual(updated.handoff, assigned.handoff)
+        self.assertEqual(updated.triage, assigned.triage)
+
+    async def test_a_later_message_can_quote_an_earlier_customer_message(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                return _Draft(
+                    title="Pilot",
+                    kind="mixed",
+                    summary="Updated reading." if "\n\n" in body else "First reading.",
+                    support_steps=[],
+                    evidence=["launch a pilot next month"],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Harborline Labs",
+            body="We want to launch a pilot next month.",
+        ))
+
+        updated = await inbox.append_customer_message(opened.id, "The recordings are still failing.")
+
+        self.assertEqual(updated.triage.summary, "Updated reading.")
+        evidence = updated.triage.evidence[0]
+        self.assertEqual(evidence.message, 0)
+        self.assertEqual(
+            quote_text(updated.messages[evidence.message].body, evidence),
+            "launch a pilot next month",
+        )
+
+    async def test_a_blank_follow_up_is_refused_and_an_unknown_ticket_is_missing(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                return _Draft(
+                    title="Join help",
+                    kind="support",
+                    summary="Troubleshoot the join error.",
+                    support_steps=["Check the token expiry."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Northwind Studio",
+            body="My join call returns an invalid token error.",
+        ))
+
+        with self.assertRaises(ValidationError):
+            await inbox.append_customer_message(opened.id, "   ")
+        self.assertEqual(inbox.get(opened.id), opened)
+
+        with self.assertRaises(TicketNotFound):
+            await inbox.append_customer_message("RTC-9999", "Still here.")
+
+
+class StoredLetterTest(TestCase):
+    def test_a_stored_letter_opens_as_one_customer_message(self):
+        ticket = Ticket.model_validate({
+            "id": "RTC-1042",
+            "origin": "sample",
+            "title": "Cloud recording availability",
+            "customer": "Cedarline Media",
+            "body": "Do you support cloud recording?",
+            "triage": {
+                "kind": "clarify",
+                "summary": "Ask about the recording use case.",
+                "support_steps": ["Confirm what the customer needs to record."],
+                "questions": ["Do you have a planned launch date?"],
+            },
+        })
+
+        self.assertEqual(
+            [message.body for message in ticket.messages],
+            ["Do you support cloud recording?"],
+        )
 
 
 class OpenAIResponseTest(IsolatedAsyncioTestCase):
@@ -97,5 +345,8 @@ class OpenAIResponseTest(IsolatedAsyncioTestCase):
                 self.assertIs(payload["store"], False)
                 self.assertEqual(ticket.id, "RTC-1043")
                 self.assertEqual(ticket.title, "Recording issue and pilot")
-                self.assertEqual(ticket.body, body)
-                self.assertEqual(quote_text(ticket.body, ticket.triage.evidence[0]), "We want a pilot next month.")
+                self.assertEqual(ticket.messages[0].body, body)
+                self.assertEqual(
+                    quote_text(ticket.messages[0].body, ticket.triage.evidence[0]),
+                    "We want a pilot next month.",
+                )
