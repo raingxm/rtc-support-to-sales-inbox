@@ -3,7 +3,7 @@ from typing import Sequence
 from psycopg import Connection, IsolationLevel, connect
 from psycopg.types.json import Json
 
-from api.inbox import Owner, Ticket, TicketContent, TicketNotFound
+from api.inbox import CustomerMessage, Owner, Ticket, TicketContent, TicketNotFound, Triage
 
 
 _CREATE_TICKETS = """
@@ -90,9 +90,36 @@ class PostgresTicketStore:
             assert row is not None
             return _ticket(row)
 
+    def append_message(
+        self, ticket_id: str, message: CustomerMessage, triage: Triage | None, prior_count: int,
+    ) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            use_new_triage = latest.handoff is None and triage is not None and len(latest.messages) == prior_count
+            updated = latest.model_copy(update={
+                "messages": (*latest.messages, message),
+                "triage": triage if use_new_triage else latest.triage,
+            })
+            connection.execute(
+                "UPDATE rtc_tickets SET content = %s WHERE id = %s",
+                (Json(updated.model_dump(mode="json", include=set(TicketContent.model_fields))), ticket_id),
+            )
+            stored = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
+        assert stored is not None
+        return _ticket(stored)
+
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
         with self._connect() as connection:
-            row = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
             if row is None:
                 raise TicketNotFound(ticket_id)
             ticket = _ticket(row)

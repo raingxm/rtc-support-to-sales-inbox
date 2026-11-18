@@ -5,6 +5,7 @@ const ownerSchema = z.enum(owners);
 export type Owner = z.infer<typeof ownerSchema>;
 
 const evidenceSpanSchema = z.object({
+  message: z.int().nonnegative(),
   start: z.int().nonnegative(),
   end: z.int().positive(),
 }).refine(({ start, end }) => start < end);
@@ -20,7 +21,7 @@ const ticketSchema = z.object({
   id: z.string(),
   title: z.string(),
   customer: z.string(),
-  body: z.string(),
+  messages: z.array(z.object({ body: z.string() })).min(1),
   status: z.literal("open"),
   origin: z.enum(["sample", "live"]),
   triage: z.discriminatedUnion("kind", [
@@ -50,14 +51,7 @@ const rejectedQuoteSchema = z.object({
   quote: z.string(),
 });
 
-export async function submitLetter(letter: { customer: string; body: string }) {
-  const response = await fetch("/api/tickets", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(letter),
-    signal: AbortSignal.timeout(45000),
-  });
-
+async function submittedTicket(response: Response, fallback: string) {
   if (response.status === 503) {
     throw new LetterSubmissionError("Live analysis is unavailable. Ask the workspace administrator to configure it.");
   }
@@ -73,8 +67,41 @@ export async function submitLetter(letter: { customer: string; body: string }) {
     }
     throw new LetterSubmissionError("The letter or its analysis could not be checked. Review the message and try again.");
   }
-  if (!response.ok) throw new Error("Could not analyze the letter");
+  if (!response.ok) throw new Error(fallback);
   return ticketSchema.parse(await response.json());
+}
+
+export async function submitLetter(letter: { customer: string; body: string }) {
+  const response = await fetch("/api/tickets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(letter),
+    signal: AbortSignal.timeout(45000),
+  });
+  return submittedTicket(response, "Could not analyze the letter");
+}
+
+export async function fetchTicket(ticketId: string, signal?: AbortSignal) {
+  const response = await fetch("/api/tickets/" + encodeURIComponent(ticketId), {
+    cache: "no-store",
+    signal,
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error("Could not load ticket");
+  return ticketSchema.parse(await response.json());
+}
+
+export async function appendCustomerMessage(ticketId: string, body: string) {
+  const response = await fetch(
+    "/api/tickets/" + encodeURIComponent(ticketId) + "/messages",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+      signal: AbortSignal.timeout(45000),
+    },
+  );
+  return submittedTicket(response, "Could not add the message");
 }
 
 export async function createHandoff(ticketId: string, owner: Owner) {
