@@ -168,7 +168,16 @@ def quote_text(body: str, span: Span) -> str:
 
 
 _CREDENTIAL = re.compile(
-    r"(?:UserSig|SDKSecretKey)[ \t]*[=:：][ \t]*\S+[ \t]*\n?"
+    r"""(?x)
+    [`"']?
+    (?i:UserSig|SDKSecretKey)
+    [`"']?
+    [ \t]*[=:：][ \t]*
+    (?:
+        (?: "[^"\n]*" | '[^'\n]*' | `[^`\n]*` | \S+ ) [ \t]*\n?
+        | \n[ \t]*\S+[ \t]*(?:\n|$)
+    )
+    """
 )
 
 
