@@ -1,6 +1,7 @@
 import asyncio
 import re
 import secrets
+from collections.abc import Collection
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Annotated, Literal, NamedTuple, Protocol, Sequence
@@ -48,6 +49,18 @@ class SupportPerson(BaseModel):
 
 
 class HandoffRejected(Exception):
+    pass
+
+
+class WithdrawalRejected(Exception):
+    pass
+
+
+class SolutionEngineerRejected(Exception):
+    pass
+
+
+class HandbackRejected(Exception):
     pass
 
 
@@ -171,6 +184,8 @@ class TicketContent(BaseModel):
     credential: str = ""
     replies: tuple[Reply, ...] = ()
     pending_reason: PendingReason | None = None
+    taken_over: bool = False
+    handed_back_by: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -194,14 +209,30 @@ class Ticket(TicketContent):
     origin: Literal["sample", "live"]
     status: Literal["open"] = "open"
     handoff: Handoff | None = None
+    confirmed_by: str | None = None
+    withdrawn_by: str | None = None
     pending: Pending | None = None
 
-    def assign_handoff(self, owner: Owner) -> "Ticket":
+    def assign_handoff(self, owner: Owner, confirmed_by: str) -> "Ticket":
         if not isinstance(self.triage, MixedTriage):
             raise HandoffRejected
         if self.handoff is not None:
             return self
-        return self.model_copy(update={"handoff": Handoff(owner=owner)})
+        return self.model_copy(update={
+            "handoff": Handoff(owner=owner),
+            "confirmed_by": confirmed_by,
+            "withdrawn_by": None,
+        })
+
+    def withdraw_handoff(self, withdrawn_by: str) -> "Ticket":
+        if self.handoff is None:
+            raise WithdrawalRejected
+        return self.model_copy(update={"handoff": None, "withdrawn_by": withdrawn_by})
+
+    def hand_back(self, handed_back_by: str) -> "Ticket":
+        if not self.taken_over:
+            raise HandbackRejected
+        return self.model_copy(update={"taken_over": False, "handed_back_by": handed_back_by})
 
 
 class _SampleTriage(_TriageText):
@@ -342,7 +373,9 @@ class TicketStore(Protocol):
     def append(self, content: TicketContent) -> Ticket: ...
     def append_message(self, ticket_id: str, message: CustomerMessage) -> Ticket: ...
     def drop_last_message(self, ticket_id: str, message_count: int) -> Ticket: ...
-    def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket: ...
+    def confirm_handoff(self, ticket_id: str, owner: Owner, confirmed_by: str) -> Ticket: ...
+    def withdraw_handoff(self, ticket_id: str, withdrawn_by: str) -> Ticket: ...
+    def hand_back(self, ticket_id: str, handed_back_by: str) -> Ticket: ...
     def delete(self, ticket_id: str) -> None: ...
     def apply_analysis(self, ticket_id: str, triage: Triage, title: str, message_count: int) -> Ticket: ...
     def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket: ...
@@ -403,12 +436,21 @@ class _MemoryTicketStore:
                 self._tickets[ticket_id] = latest
             return latest
 
-    def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
+    def confirm_handoff(self, ticket_id: str, owner: Owner, confirmed_by: str) -> Ticket:
         with self._lock:
             ticket = self._tickets.get(ticket_id)
             if ticket is None:
                 raise TicketNotFound(ticket_id)
-            updated = ticket.assign_handoff(owner)
+            updated = ticket.assign_handoff(owner, confirmed_by)
+            self._tickets[ticket_id] = updated
+            return updated
+
+    def withdraw_handoff(self, ticket_id: str, withdrawn_by: str) -> Ticket:
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None:
+                raise TicketNotFound(ticket_id)
+            updated = ticket.withdraw_handoff(withdrawn_by)
             self._tickets[ticket_id] = updated
             return updated
 
@@ -474,7 +516,17 @@ class _MemoryTicketStore:
             updated = latest.model_copy(update={
                 "replies": (*latest.replies, reply),
                 "pending_reason": None,
+                "taken_over": True,
             })
+            self._tickets[ticket_id] = updated
+            return updated
+
+    def hand_back(self, ticket_id: str, handed_back_by: str) -> Ticket:
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None:
+                raise TicketNotFound(ticket_id)
+            updated = ticket.hand_back(handed_back_by)
             self._tickets[ticket_id] = updated
             return updated
 
@@ -488,12 +540,14 @@ class Inbox:
         documents: _Documents | None = None,
         clock: _Clock | None = None,
         wait_limit: float = 30,
+        support_names: Collection[str] = (),
     ) -> None:
         self._analyzer = analyzer
         self._store = store if store is not None else _MemoryTicketStore()
         self._documents = documents
         self._clock = clock
         self._wait_limit = wait_limit
+        self._support_names = frozenset(name.strip() for name in support_names if name.strip())
         self._background: set[asyncio.Task[None]] = set()
 
     def _now(self) -> datetime:
@@ -634,6 +688,7 @@ class Inbox:
         documents: _Documents | None = None,
         clock: _Clock | None = None,
         wait_limit: float = 30,
+        support_names: Collection[str] = (),
     ) -> "Inbox":
         inbox = cls(
             analyzer,
@@ -641,6 +696,7 @@ class Inbox:
             documents=documents,
             clock=clock,
             wait_limit=wait_limit,
+            support_names=support_names,
         )
         tickets = []
         for sample in samples:
@@ -712,9 +768,22 @@ class Inbox:
             await asyncio.to_thread(self._store.drop_last_message, ticket_id, prior_count + 1)
             raise
 
+    def use_support_names(self, names: Collection[str]) -> None:
+        self._support_names = frozenset(name.strip() for name in names if name.strip())
+
     def confirm_handoff(self, ticket_id: str, owner: Owner, *, person: SupportPerson | None = None) -> Ticket:
-        _signed_in(person)
-        return self._present(self._store.confirm_handoff(ticket_id, owner))
+        person = _signed_in(person)
+        if owner == person.name or owner in self._support_names:
+            raise SolutionEngineerRejected
+        return self._present(self._store.confirm_handoff(ticket_id, owner, person.name))
+
+    def withdraw_handoff(self, ticket_id: str, *, person: SupportPerson | None = None) -> Ticket:
+        person = _signed_in(person)
+        return self._present(self._store.withdraw_handoff(ticket_id, person.name))
+
+    def hand_back(self, ticket_id: str, *, person: SupportPerson | None = None) -> Ticket:
+        person = _signed_in(person)
+        return self._present(self._store.hand_back(ticket_id, person.name))
 
     def reply(self, ticket_id: str, body: str, *, person: SupportPerson) -> Ticket:
         reply = Reply(body=body, author=person.name)

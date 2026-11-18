@@ -7,7 +7,8 @@ import {
 import { type FormEvent, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { DeskFrame } from "./frame";
 import {
-  createHandoff, LetterSubmissionError, listTickets, owners, sendReply, signIn, submitLetter,
+  createHandoff, handBack as requestHandBack, LetterSubmissionError, listTickets, owners, sendReply, signIn, submitLetter,
+  withdrawHandoff,
   supportName, supportToken, SupportSignInRequired, type EvidenceSpan, type Owner, type Ticket,
 } from "../lib/tickets";
 
@@ -57,6 +58,8 @@ function TicketList({ tickets, selectedId, onSelect }: {
               <span className={"badge " + (ticket.pending ? "pending" : ticket.triage?.kind ?? "")}>
                 {ticket.handoff
                   ? "Handoff assigned"
+                  : ticket.withdrawn_by
+                    ? "Handoff withdrawn"
                   : ticket.pending
                     ? pendingLabels[ticket.pending.reason]
                     : ticket.triage
@@ -145,23 +148,44 @@ function HandoffForm({ ticket, onUpdated }: {
   ticket: Ticket;
   onUpdated: (ticket: Ticket) => void;
 }) {
+  const engineers = owners.filter((name) => name !== supportName());
   const [owner, setOwner] = useState<Owner | "">("");
   const [submission, setSubmission] = useState<"idle" | "pending" | "error">("idle");
   const result = useRef<HTMLDivElement>(null);
+  const shouldFocus = useRef(false);
   const pending = submission === "pending";
 
   useEffect(() => {
-    if (ticket.handoff && pending) result.current?.focus();
-  }, [ticket.handoff, pending]);
+    if (!shouldFocus.current || (!ticket.handoff && !ticket.withdrawn_by)) return;
+    shouldFocus.current = false;
+    result.current?.focus();
+  }, [ticket.handoff, ticket.withdrawn_by, ticket.confirmed_by]);
 
   async function confirm(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!owner || pending) return;
 
+    shouldFocus.current = true;
     setSubmission("pending");
     try {
       onUpdated(await createHandoff(ticket.id, owner));
+      setSubmission("idle");
     } catch {
+      shouldFocus.current = false;
+      setSubmission("error");
+    }
+  }
+
+  async function withdraw() {
+    if (pending) return;
+    shouldFocus.current = true;
+    setSubmission("pending");
+    try {
+      onUpdated(await withdrawHandoff(ticket.id));
+      setOwner("");
+      setSubmission("idle");
+    } catch {
+      shouldFocus.current = false;
       setSubmission("error");
     }
   }
@@ -170,36 +194,55 @@ function HandoffForm({ ticket, onUpdated }: {
     return (
       <div className="handoff-result" role="status" tabIndex={-1} ref={result}>
         <Check size={17} />
-        <div><strong>Follow-up assigned to {ticket.handoff.owner}</strong>
-          <p>Support ticket {ticket.id} stays open.</p></div>
+        <div>
+          <strong>Follow-up assigned to {ticket.handoff.owner}</strong>
+          {ticket.confirmed_by && <p>Confirmed by {ticket.confirmed_by}</p>}
+          <p>Support ticket {ticket.id} stays open.</p>
+        </div>
+        <button className="action" type="button" onClick={withdraw} disabled={pending}>
+          {pending ? "Withdrawing…" : "Withdraw handoff"}
+        </button>
+        {submission === "error" && (
+          <p className="error-note" role="alert">Could not withdraw the handoff. Try again.</p>
+        )}
       </div>
     );
   }
 
   return (
-    <form className="handoff-form" onSubmit={confirm} noValidate aria-busy={pending}>
-      <label htmlFor="handoff-owner">Solutions engineer</label>
-      <select
-        id="handoff-owner"
-        value={owner}
-        disabled={pending}
-        onChange={(event) => {
-          const selectedOwner = owners.find((name) => name === event.target.value);
-          setOwner(selectedOwner ?? "");
-          setSubmission("idle");
-        }}
-      >
-        <option value="">Select an assignee</option>
-        {owners.map((name) => <option key={name}>{name}</option>)}
-      </select>
-      <button className="action" type="submit" disabled={!owner || pending}>
-        <span>{pending ? "Confirming…" : "Confirm handoff"}</span>
-        <ArrowRight size={16} />
-      </button>
-      {submission === "error" && (
-        <p className="error-note" role="alert">Could not confirm the handoff. Try again.</p>
+    <>
+      {ticket.withdrawn_by && (
+        <div className="handoff-result" role="status" tabIndex={-1} ref={result}>
+          <div>
+            {ticket.confirmed_by && <strong>Confirmed by {ticket.confirmed_by}</strong>}
+            <p>Withdrawn by {ticket.withdrawn_by}</p>
+          </div>
+        </div>
       )}
-    </form>
+      <form className="handoff-form" onSubmit={confirm} noValidate aria-busy={pending}>
+        <label htmlFor="handoff-owner">Solutions engineer</label>
+        <select
+          id="handoff-owner"
+          value={owner}
+          disabled={pending}
+          onChange={(event) => {
+            const selectedOwner = engineers.find((name) => name === event.target.value);
+            setOwner(selectedOwner ?? "");
+            setSubmission("idle");
+          }}
+        >
+          <option value="">Select an assignee</option>
+          {engineers.map((name) => <option key={name}>{name}</option>)}
+        </select>
+        <button className="action" type="submit" disabled={!owner || pending}>
+          <span>{pending ? "Confirming…" : "Confirm handoff"}</span>
+          <ArrowRight size={16} />
+        </button>
+        {submission === "error" && (
+          <p className="error-note" role="alert">Could not confirm the handoff. Try again.</p>
+        )}
+      </form>
+    </>
   );
 }
 
@@ -232,6 +275,42 @@ function formatWait(seconds: number) {
   const rest = seconds % 60;
   if (minutes <= 0) return `${rest}s`;
   return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
+}
+
+function Takeover({ ticket, onUpdated }: {
+  ticket: Ticket;
+  onUpdated: (ticket: Ticket) => void;
+}) {
+  const [submission, setSubmission] = useState<"idle" | "pending" | "error">("idle");
+  const pending = submission === "pending";
+  if (!ticket.taken_over && !ticket.handed_back_by) return null;
+
+  async function handBack() {
+    if (pending) return;
+    setSubmission("pending");
+    try {
+      onUpdated(await requestHandBack(ticket.id));
+      setSubmission("idle");
+    } catch {
+      setSubmission("error");
+    }
+  }
+
+  return (
+    <div className="takeover-note" role="status">
+      {ticket.taken_over
+        ? <strong>With support</strong>
+        : <strong>Handed back by {ticket.handed_back_by}</strong>}
+      {ticket.taken_over && (
+        <button className="action" type="button" onClick={handBack} disabled={pending}>
+          {pending ? "Handing back…" : "Hand back"}
+        </button>
+      )}
+      {submission === "error" && (
+        <p className="error-note" role="alert">Could not hand this back. Try again.</p>
+      )}
+    </div>
+  );
 }
 
 function ReplyForm({ ticket, onUpdated }: {
@@ -320,6 +399,7 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
             <span>Waiting {formatWait(ticket.pending.waiting_seconds)} since the customer's last message.</span>
           </p>
         )}
+        <Takeover ticket={ticket} onUpdated={onUpdated} />
         <ReplyForm ticket={ticket} onUpdated={onUpdated} />
       </section>
 

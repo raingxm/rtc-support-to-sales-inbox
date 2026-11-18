@@ -15,6 +15,7 @@ from api.inbox import (
     AnalysisUnavailable,
     CustomerMessage,
     CustomerView,
+    HandbackRejected,
     Handoff,
     HandoffRejected,
     Inbox,
@@ -22,9 +23,11 @@ from api.inbox import (
     QuoteRejected,
     Reply,
     SAMPLES,
+    SolutionEngineerRejected,
     SupportPerson,
     Ticket,
     TicketNotFound,
+    WithdrawalRejected,
 )
 from api.model_analyzer import configured_analyzer
 from api.postgres import PostgresTicketStore
@@ -126,7 +129,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.staff = configured_staff
-        app.state.inbox = inbox if inbox is not None else await asyncio.to_thread(_configured_inbox)
+        opened = inbox if inbox is not None else await asyncio.to_thread(_configured_inbox)
+        opened.use_support_names(person.name for person in configured_staff.values())
+        app.state.inbox = opened
         yield
 
     app = FastAPI(title="RTC Support-to-Sales Inbox", lifespan=lifespan)
@@ -181,6 +186,36 @@ def create_app(
             raise HTTPException(
                 status_code=409, detail="This ticket does not have a handoff recommendation."
             ) from None
+        except SolutionEngineerRejected:
+            raise HTTPException(
+                status_code=409, detail="A support person cannot be the solutions engineer."
+            ) from None
+
+    @app.post("/tickets/{ticket_id}/withdrawal")
+    def withdraw_handoff(
+        ticket_id: str,
+        person: SupportDependency,
+        active_inbox: InboxDependency,
+    ) -> Ticket:
+        try:
+            return active_inbox.withdraw_handoff(ticket_id, person=person)
+        except TicketNotFound:
+            raise HTTPException(status_code=404, detail="Ticket not found.") from None
+        except WithdrawalRejected:
+            raise HTTPException(status_code=409, detail="There is no handoff to withdraw.") from None
+
+    @app.post("/tickets/{ticket_id}/handback")
+    def hand_back(
+        ticket_id: str,
+        person: SupportDependency,
+        active_inbox: InboxDependency,
+    ) -> Ticket:
+        try:
+            return active_inbox.hand_back(ticket_id, person=person)
+        except TicketNotFound:
+            raise HTTPException(status_code=404, detail="Ticket not found.") from None
+        except HandbackRejected:
+            raise HTTPException(status_code=409, detail="Support has not taken over this ticket.") from None
 
     @app.post("/tickets/{ticket_id}/replies")
     def send_reply(
