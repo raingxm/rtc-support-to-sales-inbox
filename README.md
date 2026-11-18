@@ -28,13 +28,21 @@ Open [the workbench](http://127.0.0.1:3000). On macOS or Linux, use `.venv/bin/p
 
 FastAPI reads `.env` from the repository root when it starts. A value already set in the shell takes precedence. Restart FastAPI after changing `.env`.
 
+Each support person has their own token. Put them in `.env` as `Name=token`, separated by commas.
+
+```dotenv
+RTC_SUPPORT_STAFF=Your Name=local-token
+```
+
+Open the support entrance and sign in with that token. The customer entrance does not ask for it. Customers return through the ticket address, which contains an unguessable credential. A ticket number alone does not open the customer entrance.
+
 ## Walk through the three tickets
 
 1. Open **RTC-1042**. Check the original recording report and the evidence for a migration pilot. Select a solutions engineer and confirm the handoff. The support ticket remains open.
 2. Open **RTC-1041**. Review the Flutter token troubleshooting steps.
 3. Open **RTC-1040**. Review what to ask about the recording use case and launch date.
 
-FastAPI serves three fictional tickets with prepared triage results. You can review them and confirm a handoff without a model key. The demo uses in-memory storage when `DATABASE_URL` is empty.
+FastAPI serves three fictional tickets with prepared triage results. After you sign in, you can review them and confirm a handoff without a model key. The demo uses in-memory storage when `DATABASE_URL` is empty.
 
 ## Analyze a new letter
 
@@ -46,7 +54,7 @@ To use Quanzil, set `OPENAI_BASE_URL=https://quanzil.com/v1` and use a Quanzil k
 2. Click **Analyze letter**. The workbench selects the new ticket and shows its triage under **Live analysis**.
 3. For an opportunity, compare each quote with the highlighted text in the customer message.
 
-The API sends the message body to the configured model provider for analysis. It adds the ticket only after every evidence quote matches the original text.
+The customer’s words are saved on the ticket before analysis runs. If analysis times out or fails, the ticket and those words remain, and support sees that waiting has stopped. A quote that is not in the customer’s message is still rejected, and that submission is not kept.
 
 ## Persist tickets and handoffs
 

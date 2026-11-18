@@ -1,10 +1,20 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-test("routes three RTC tickets and keeps support open after a confirmed handoff", async ({ page, request }, testInfo) => {
-  const ticketsResponse = page.waitForResponse((response) =>
+const supportHeaders = { Authorization: "Bearer playwright-support-token" };
+
+async function signIn(page: Page) {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("playwright-support-token");
+  const tickets = page.waitForResponse((response) =>
     new URL(response.url()).pathname === "/api/tickets" && response.ok(),
   );
-  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await tickets;
+  return tickets;
+}
+
+test("routes three RTC tickets and keeps support open after a confirmed handoff", async ({ page, request }, testInfo) => {
+  const ticketsResponse = signIn(page);
   expect(await (await ticketsResponse).json()).toHaveLength(3);
 
   await page.getByRole("button", { name: /RTC-1040|Cedarline Media/ }).click();
@@ -33,7 +43,10 @@ test("routes three RTC tickets and keeps support open after a confirmed handoff"
   expect(await response.json()).toMatchObject({ status: "open", handoff: { owner: "Maya Chen" } });
   await expect(page.getByText("Follow-up assigned to Maya Chen", { exact: true })).toBeVisible();
 
-  const repeated = await request.post("/api/tickets/RTC-1042/handoff", { data: { owner: "Jordan Lee" } });
+  const repeated = await request.post("/api/tickets/RTC-1042/handoff", {
+    headers: supportHeaders,
+    data: { owner: "Jordan Lee" },
+  });
   expect(await repeated.json()).toMatchObject({ status: "open", handoff: { owner: "Maya Chen" } });
   await page.reload();
   await expect(page.getByText("Follow-up assigned to Maya Chen", { exact: true })).toBeVisible();
@@ -53,9 +66,11 @@ test("checks a new letter against the source before adding it to the queue", asy
   const message = page.getByRole("textbox", { name: "Customer message" });
   const analyze = page.getByRole("button", { name: "Analyze letter" });
   const body = "📹 Our recordings sometimes fail.\nWe want to launch a pilot next month.";
-  const before = await (await request.get("/api/tickets")).json();
+  const before = await (await request.get("/api/tickets", { headers: supportHeaders })).json();
 
   await page.goto("/");
+  await page.getByLabel("Access token").fill("playwright-support-token");
+  await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByText("New letter", { exact: true }).click();
   await customer.fill("Cypress Video");
 
@@ -68,7 +83,7 @@ test("checks a new letter against the source before adding it to the queue", asy
   expect((await rejected).status()).toBe(422);
   await expect(page.getByRole("main").getByRole("alert")).toContainText("could not find this quote");
   await expect(message).toHaveValue(rejectedBody);
-  expect(await (await request.get("/api/tickets")).json()).toEqual(before);
+  expect(await (await request.get("/api/tickets", { headers: supportHeaders })).json()).toEqual(before);
   await expect(queue.getByRole("button")).toHaveCount(before.length);
 
   await message.fill(body);
@@ -109,7 +124,7 @@ test("customer and support show the same conversation", async ({ page }) => {
 
   const support = await page.context().newPage();
   await support.setViewportSize({ width: 390, height: 844 });
-  await support.goto("/");
+  await signIn(support);
   await support.getByRole("button", { name: /Lumen Field/ }).click();
   await expect(support.locator(".detail")).toContainText("Lumen Field");
   await expect(support.locator(".message p")).toHaveText([first, second]);

@@ -17,6 +17,21 @@ const assessmentFields = {
   questions: z.array(z.string()),
 };
 
+const triageSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("mixed"),
+    ...assessmentFields,
+    evidence: z.array(evidenceSpanSchema).min(1),
+  }),
+  z.object({ kind: z.enum(["support", "clarify"]), ...assessmentFields }),
+]);
+
+const replySchema = z.object({
+  body: z.string(),
+  author: z.string().nullable(),
+});
+export type Reply = z.infer<typeof replySchema>;
+
 const ticketSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -24,22 +39,68 @@ const ticketSchema = z.object({
   messages: z.array(z.object({ body: z.string() })).min(1),
   status: z.literal("open"),
   origin: z.enum(["sample", "live"]),
-  triage: z.discriminatedUnion("kind", [
-    z.object({
-      kind: z.literal("mixed"),
-      ...assessmentFields,
-      evidence: z.array(evidenceSpanSchema).min(1),
-    }),
-    z.object({ kind: z.enum(["support", "clarify"]), ...assessmentFields }),
-  ]),
+  triage: triageSchema.nullable(),
   handoff: z.object({ owner: ownerSchema }).nullable(),
+  pending: z.object({
+    reason: z.literal("已经停止等待"),
+    waiting_seconds: z.int().nonnegative(),
+  }).nullable(),
+  replies: z.array(replySchema),
 });
 
 const ticketListSchema = z.array(ticketSchema);
 export type Ticket = z.infer<typeof ticketSchema>;
 
+const supportTokenKey = "rtc-support-token";
+const supportNameKey = "rtc-support-name";
+
+export class SupportSignInRequired extends Error {}
+
+export function supportToken() {
+  return sessionStorage.getItem(supportTokenKey) ?? "";
+}
+
+export function supportName() {
+  return sessionStorage.getItem(supportNameKey) ?? "";
+}
+
+function supportHeaders(json = false): HeadersInit {
+  const headers: Record<string, string> = {};
+  if (json) headers["Content-Type"] = "application/json";
+  const token = supportToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+function clearSupportSession() {
+  sessionStorage.removeItem(supportTokenKey);
+  sessionStorage.removeItem(supportNameKey);
+}
+
+export async function signIn(token: string) {
+  const response = await fetch("/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (response.status === 401) throw new SupportSignInRequired();
+  if (!response.ok) throw new Error("Could not sign in");
+  const person = z.object({ name: z.string().min(1) }).parse(await response.json());
+  sessionStorage.setItem(supportTokenKey, token);
+  sessionStorage.setItem(supportNameKey, person.name);
+  return person.name;
+}
+
 export async function listTickets(signal?: AbortSignal) {
-  const response = await fetch("/api/tickets", { cache: "no-store", signal });
+  const response = await fetch("/api/tickets", {
+    cache: "no-store",
+    signal,
+    headers: supportHeaders(),
+  });
+  if (response.status === 401) {
+    clearSupportSession();
+    throw new SupportSignInRequired();
+  }
   if (!response.ok) throw new Error("Could not load tickets");
   return ticketListSchema.parse(await response.json());
 }
@@ -52,6 +113,10 @@ const rejectedQuoteSchema = z.object({
 });
 
 async function submittedTicket(response: Response, fallback: string) {
+  if (response.status === 401) {
+    clearSupportSession();
+    throw new SupportSignInRequired();
+  }
   if (response.status === 503) {
     throw new LetterSubmissionError("Live analysis is unavailable. Ask the workspace administrator to configure it.");
   }
@@ -74,7 +139,7 @@ async function submittedTicket(response: Response, fallback: string) {
 export async function submitLetter(letter: { customer: string; body: string }) {
   const response = await fetch("/api/tickets", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: supportHeaders(true),
     body: JSON.stringify(letter),
     signal: AbortSignal.timeout(45000),
   });
@@ -85,23 +150,15 @@ export async function fetchTicket(ticketId: string, signal?: AbortSignal) {
   const response = await fetch("/api/tickets/" + encodeURIComponent(ticketId), {
     cache: "no-store",
     signal,
+    headers: supportHeaders(),
   });
+  if (response.status === 401) {
+    clearSupportSession();
+    throw new SupportSignInRequired();
+  }
   if (response.status === 404) return null;
   if (!response.ok) throw new Error("Could not load ticket");
   return ticketSchema.parse(await response.json());
-}
-
-export async function appendCustomerMessage(ticketId: string, body: string) {
-  const response = await fetch(
-    "/api/tickets/" + encodeURIComponent(ticketId) + "/messages",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body }),
-      signal: AbortSignal.timeout(45000),
-    },
-  );
-  return submittedTicket(response, "Could not add the message");
 }
 
 export async function createHandoff(ticketId: string, owner: Owner) {
@@ -109,11 +166,100 @@ export async function createHandoff(ticketId: string, owner: Owner) {
     "/api/tickets/" + encodeURIComponent(ticketId) + "/handoff",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: supportHeaders(true),
       body: JSON.stringify({ owner }),
       signal: AbortSignal.timeout(8000),
     },
   );
+  if (response.status === 401) {
+    clearSupportSession();
+    throw new SupportSignInRequired();
+  }
   if (!response.ok) throw new Error("Could not confirm handoff");
   return ticketSchema.parse(await response.json());
+}
+
+export async function sendReply(ticketId: string, body: string) {
+  const response = await fetch(
+    "/api/tickets/" + encodeURIComponent(ticketId) + "/replies",
+    {
+      method: "POST",
+      headers: supportHeaders(true),
+      body: JSON.stringify({ body }),
+      signal: AbortSignal.timeout(8000),
+    },
+  );
+  if (response.status === 401) {
+    clearSupportSession();
+    throw new SupportSignInRequired();
+  }
+  if (response.status === 422) throw new LetterSubmissionError("Write a reply before sending it.");
+  if (!response.ok) throw new Error("Could not send the reply");
+  return ticketSchema.parse(await response.json());
+}
+
+const customerSchema = z.object({
+  id: z.string(),
+  credential: z.string().min(1),
+  title: z.string(),
+  customer: z.string(),
+  messages: z.array(z.object({ body: z.string() })).min(1),
+  replies: z.array(replySchema),
+});
+export type CustomerTicket = z.infer<typeof customerSchema>;
+
+async function customerTicket(response: Response, fallback: string) {
+  if (response.status === 503) {
+    throw new LetterSubmissionError("Live analysis is unavailable. Ask the workspace administrator to configure it.");
+  }
+  if (response.status === 502) {
+    throw new LetterSubmissionError("Analysis failed. The ticket was kept. Open it again from the address you were given.");
+  }
+  if (response.status === 422) {
+    const rejection = rejectedQuoteSchema.safeParse(await response.json());
+    if (rejection.success) {
+      throw new LetterSubmissionError(
+        `That message could not be checked. “${rejection.data.quote}” Try again.`,
+      );
+    }
+    throw new LetterSubmissionError("Write a message and try again.");
+  }
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(fallback);
+  return customerSchema.parse(await response.json());
+}
+
+export async function openCustomerTicket(letter: { customer: string; body: string }) {
+  const response = await fetch("/api/customer-tickets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(letter),
+    signal: AbortSignal.timeout(45000),
+  });
+  const ticket = await customerTicket(response, "Could not open the ticket");
+  if (!ticket) throw new Error("Could not open the ticket");
+  return ticket;
+}
+
+export async function fetchCustomerTicket(ticketId: string, credential: string, signal?: AbortSignal) {
+  const response = await fetch(
+    "/api/customer-tickets/" + encodeURIComponent(ticketId) + "/" + encodeURIComponent(credential),
+    { cache: "no-store", signal },
+  );
+  return customerTicket(response, "Could not load ticket");
+}
+
+export async function appendCustomerMessage(ticketId: string, credential: string, body: string) {
+  const response = await fetch(
+    "/api/customer-tickets/" + encodeURIComponent(ticketId) + "/" + encodeURIComponent(credential) + "/messages",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+      signal: AbortSignal.timeout(45000),
+    },
+  );
+  const ticket = await customerTicket(response, "Could not add the message");
+  if (!ticket) throw new Error("Could not add the message");
+  return ticket;
 }

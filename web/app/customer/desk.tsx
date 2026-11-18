@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { DeskFrame } from "../frame";
 import {
-  appendCustomerMessage, fetchTicket, LetterSubmissionError, submitLetter, type Ticket,
+  appendCustomerMessage, fetchCustomerTicket, LetterSubmissionError, openCustomerTicket,
+  type CustomerTicket as CustomerRecord,
 } from "../../lib/tickets";
 
 type Submission =
@@ -40,8 +41,8 @@ export function OpenTicket() {
 
     setSubmission({ status: "pending" });
     try {
-      const ticket = await submitLetter({ customer: name.trim(), body });
-      router.push("/customer/" + encodeURIComponent(ticket.id));
+      const ticket = await openCustomerTicket({ customer: name.trim(), body });
+      router.push("/customer/" + encodeURIComponent(ticket.id) + "/" + encodeURIComponent(ticket.credential));
     } catch (error) {
       setSubmission({
         status: "error",
@@ -91,9 +92,9 @@ type TicketView =
   | { status: "loading" }
   | { status: "missing" }
   | { status: "error" }
-  | { status: "ready"; ticket: Ticket };
+  | { status: "ready"; ticket: CustomerRecord };
 
-export function CustomerTicket({ ticketId }: { ticketId: string }) {
+export function CustomerTicket({ ticketId, credential }: { ticketId: string; credential: string }) {
   const [view, setView] = useState<TicketView>({ status: "loading" });
   const [body, setBody] = useState("");
   const [submission, setSubmission] = useState<Submission>({ status: "idle" });
@@ -105,14 +106,14 @@ export function CustomerTicket({ ticketId }: { ticketId: string }) {
   useEffect(() => {
     const controller = new AbortController();
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]);
-    fetchTicket(ticketId, signal).then(
+    fetchCustomerTicket(ticketId, credential, signal).then(
       (ticket) => setView(ticket ? { status: "ready", ticket } : { status: "missing" }),
       () => {
         if (!controller.signal.aborted) setView({ status: "error" });
       },
     );
     return () => controller.abort();
-  }, [ticketId, loadAttempt]);
+  }, [ticketId, credential, loadAttempt]);
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -125,7 +126,7 @@ export function CustomerTicket({ ticketId }: { ticketId: string }) {
 
     setSubmission({ status: "pending" });
     try {
-      const ticket = await appendCustomerMessage(view.ticket.id, body);
+      const ticket = await appendCustomerMessage(view.ticket.id, view.ticket.credential, body);
       setBody("");
       setSubmission({ status: "idle" });
       setView({ status: "ready", ticket });
@@ -173,9 +174,15 @@ export function CustomerTicket({ ticketId }: { ticketId: string }) {
             <h2 className="eyebrow" id="conversation-heading">Conversation</h2>
             <div className="conversation">
               {ticket.messages.map((message, index) => (
-                <div className="message" key={index}>
+                <div className="message" key={"message-" + index}>
                   <h3 className="eyebrow">{ticket.messages.length === 1 ? "Your message" : `Message ${index + 1}`}</h3>
                   <p>{message.body}</p>
+                </div>
+              ))}
+              {ticket.replies.map((reply, index) => (
+                <div className="message" key={"reply-" + index}>
+                  <h3 className="eyebrow">{reply.author ?? "Relay Desk"}</h3>
+                  <p>{reply.body}</p>
                 </div>
               ))}
             </div>
