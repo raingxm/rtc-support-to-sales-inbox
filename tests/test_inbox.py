@@ -632,6 +632,138 @@ class _Clock:
         self.current += timedelta(seconds=seconds)
 
 
+class AnalysisTextTest(IsolatedAsyncioTestCase):
+    async def test_credentials_stay_out_of_analysis_and_a_quoted_result_still_opens_the_ticket(self):
+        seen: list[str] = []
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                seen.append(body)
+                return _Draft(
+                    title="Join failed",
+                    kind="mixed",
+                    summary="Follow up on the join failure.",
+                    support_steps=["Check the SDK version and the error time."],
+                    evidence=["error code -100013"],
+                    questions=[],
+                )
+
+        original = (
+            "SDK 11.4 returned error code -100013 at 2026-11-18 14:02:07.\n"
+            "UserSig: eJyrVgrxCdYrSy1SslIy0jNQ0gHzM1NS80oy0zPz0tJTi5KLAA\n"
+            "SDKSecretKey: 89abcdef0123456789abcdef01234567"
+        )
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+
+        ticket = await inbox.submit(Letter(customer="Northwind Studio", body=original))
+
+        self.assertEqual(seen, [
+            "SDK 11.4 returned error code -100013 at 2026-11-18 14:02:07.\n",
+        ])
+        self.assertEqual(ticket.messages[0].body, original)
+        self.assertEqual(
+            quote_text(ticket.messages[0].body, ticket.triage.evidence[0]),
+            "error code -100013",
+        )
+
+    async def test_a_later_message_keeps_its_credentials_out_of_analysis(self):
+        seen: list[str] = []
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                seen.append(body)
+                if "\n\n" in body:
+                    return _Draft(
+                        title="Join failed",
+                        kind="mixed",
+                        summary="Follow up on the join failure.",
+                        support_steps=["Check the error time."],
+                        evidence=["error code -100013"],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Recording",
+                    kind="support",
+                    summary="Ask for the failure details.",
+                    support_steps=["Ask for the error code."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+        opened = await inbox.submit(Letter(
+            customer="Northwind Studio",
+            body="Recordings fail on SDK 11.4.",
+        ))
+        follow_up = (
+            "It returned error code -100013 at 2026-11-18 14:02:07.\n"
+            "UserSig: eJyrVgrxCdYrSy1SslIy0jNQ0gHzM1NS80oy0zPz0tJTi5KLAA\n"
+            "SDKSecretKey: 89abcdef0123456789abcdef01234567"
+        )
+
+        updated = await inbox.append_customer_message(
+            opened.id, follow_up, credential=opened.credential,
+        )
+
+        self.assertEqual(seen[1], (
+            "Recordings fail on SDK 11.4.\n"
+            "\n"
+            "It returned error code -100013 at 2026-11-18 14:02:07.\n"
+        ))
+        self.assertEqual([message.body for message in updated.messages], [
+            "Recordings fail on SDK 11.4.",
+            follow_up,
+        ])
+        evidence = updated.triage.evidence[0]
+        self.assertEqual(evidence.message, 1)
+        self.assertEqual(
+            quote_text(updated.messages[evidence.message].body, evidence),
+            "error code -100013",
+        )
+
+    async def test_json_and_wrapped_credentials_stay_out_of_analysis(self):
+        seen: list[str] = []
+        user_sig = "eJyrVgrxCdYrSy1SslIy0jNQ0gHzM1NS80oy0zPz0tJTi5KLAA"
+        secret_key = "89abcdef0123456789abcdef01234567"
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                seen.append(body)
+                return _Draft(
+                    title="Join failed",
+                    kind="mixed",
+                    summary="Follow up on the join failure.",
+                    support_steps=["Check the SDK version and the error time."],
+                    evidence=["error code -100013"],
+                    questions=[],
+                )
+
+        original = (
+            "SDK 11.4 returned error code -100013 at 2026-11-18 14:02:07.\n"
+            f'{{"UserSig":"{user_sig}","SDKSecretKey":"{secret_key}"}}\n'
+            "usersig=\n"
+            f"{user_sig}\n"
+            f"`sdkSecretKey`: {secret_key}"
+        )
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer())
+
+        ticket = await inbox.submit(Letter(customer="Northwind Studio", body=original))
+
+        analysis = seen[0]
+        self.assertNotIn(user_sig, analysis)
+        self.assertNotIn(secret_key, analysis)
+        self.assertNotIn("usersig", analysis.lower())
+        self.assertNotIn("sdksecretkey", analysis.lower())
+        self.assertIn("SDK 11.4", analysis)
+        self.assertIn("error code -100013", analysis)
+        self.assertIn("2026-11-18 14:02:07", analysis)
+        self.assertEqual(ticket.messages[0].body, original)
+        self.assertEqual(
+            quote_text(ticket.messages[0].body, ticket.triage.evidence[0]),
+            "error code -100013",
+        )
+
+
 class StoredLetterTest(TestCase):
     def test_a_stored_letter_opens_as_one_customer_message(self):
         ticket = Ticket.model_validate({

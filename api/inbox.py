@@ -1,4 +1,5 @@
 import asyncio
+import re
 import secrets
 from datetime import datetime, timezone
 from threading import Lock
@@ -234,10 +235,25 @@ def _same_credential(stored: str, offered: str) -> bool:
     return secrets.compare_digest(stored, offered)
 
 
+_CREDENTIAL = re.compile(
+    r"""(?x)
+    [`"']?
+    (?i:UserSig|SDKSecretKey)
+    [`"']?
+    [ \t]*[=:：][ \t]*
+    (?:
+        (?: "[^"\n]*" | '[^'\n]*' | `[^`\n]*` | \S+ ) [ \t]*\n?
+        | \n[ \t]*\S+[ \t]*(?:\n|$)
+    )
+    """
+)
+
+
 def _transcript(messages: Sequence[CustomerMessage]) -> str:
-    if len(messages) == 1:
-        return messages[0].body
-    return "\n\n".join(message.body for message in messages)
+    bodies = [_CREDENTIAL.sub("", message.body) for message in messages]
+    if len(bodies) == 1:
+        return bodies[0]
+    return "\n\n".join(bodies)
 
 
 def _locate(messages: Sequence[CustomerMessage], quote: str) -> Span:
