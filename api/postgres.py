@@ -147,6 +147,32 @@ class PostgresTicketStore:
         assert stored is not None
         return _ticket(stored)
 
+    def land_analysis(
+        self,
+        ticket_id: str,
+        message_count: int,
+        reply_count: int,
+        triage: Triage,
+        title: str,
+        reply: Reply | None,
+        pending_reason: str | None,
+    ) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            if latest.handoff is not None or len(latest.messages) != message_count:
+                return latest
+            update: dict[str, object] = {"triage": triage, "title": title}
+            if reply is not None and len(latest.replies) == reply_count:
+                update["replies"] = (*latest.replies, reply)
+                update["pending_reason"] = pending_reason
+            return self._write(connection, latest.model_copy(update=update))
+
     def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(

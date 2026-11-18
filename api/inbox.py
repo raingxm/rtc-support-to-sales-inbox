@@ -3,7 +3,7 @@ import re
 import secrets
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Annotated, Literal, Protocol, Sequence
+from typing import Annotated, Literal, NamedTuple, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -124,11 +124,28 @@ class Reply(BaseModel):
         return self
 
 
+class DocumentationPage(BaseModel):
+    """One sentence copied from an opened documentation page, with that page's address."""
+
+    model_config = ConfigDict(frozen=True)
+    url: str = Field(min_length=1)
+    quote: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_content(self) -> "DocumentationPage":
+        if not self.url.strip() or not self.quote.strip():
+            raise ValueError("An opened page needs an address and a sentence.")
+        return self
+
+
+PendingReason = Literal["已经停止等待", "没有打开的公开文档"]
+
+
 class Pending(BaseModel):
     """Support-only waiting state. The customer entrance never receives this."""
 
     model_config = ConfigDict(frozen=True)
-    reason: Literal["已经停止等待"]
+    reason: PendingReason
     waiting_seconds: int = Field(ge=0)
 
 
@@ -151,7 +168,7 @@ class TicketContent(BaseModel):
     triage: Triage | None = None
     credential: str = ""
     replies: tuple[Reply, ...] = ()
-    pending_reason: Literal["已经停止等待"] | None = None
+    pending_reason: PendingReason | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -208,6 +225,16 @@ class _Analyzer(Protocol):
     async def draft(self, body: str) -> _Draft: ...
 
 
+class _Documents(Protocol):
+    async def open(self, body: str) -> DocumentationPage | None: ...
+
+
+class _Settled(NamedTuple):
+    draft: _Draft
+    triage: Triage
+    page: DocumentationPage | None
+
+
 class _Clock(Protocol):
     def now(self) -> datetime: ...
 
@@ -222,6 +249,17 @@ def _signed_in(person: SupportPerson | None) -> SupportPerson:
     if person is None or not person.name.strip():
         raise NotAuthenticated
     return person
+
+
+def _quoted_reply(page: DocumentationPage) -> Reply:
+    return Reply(body=f"{page.quote}\n{page.url}")
+
+
+def _cannot_answer(messages: Sequence[CustomerMessage]) -> str:
+    latest = messages[-1].body if messages else ""
+    if any("\u4e00" <= character <= "\u9fff" for character in latest):
+        return "这次答不了。"
+    return "I can't answer this."
 
 
 def _provisional_title(body: str) -> str:
@@ -306,6 +344,16 @@ class TicketStore(Protocol):
     def delete(self, ticket_id: str) -> None: ...
     def apply_analysis(self, ticket_id: str, triage: Triage, title: str, message_count: int) -> Ticket: ...
     def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket: ...
+    def land_analysis(
+        self,
+        ticket_id: str,
+        message_count: int,
+        reply_count: int,
+        triage: Triage,
+        title: str,
+        reply: Reply | None,
+        pending_reason: PendingReason | None,
+    ) -> Ticket: ...
     def add_reply(self, ticket_id: str, reply: Reply) -> Ticket: ...
 
 
@@ -386,6 +434,30 @@ class _MemoryTicketStore:
                 self._tickets[ticket_id] = latest
             return latest
 
+    def land_analysis(
+        self,
+        ticket_id: str,
+        message_count: int,
+        reply_count: int,
+        triage: Triage,
+        title: str,
+        reply: Reply | None,
+        pending_reason: PendingReason | None,
+    ) -> Ticket:
+        with self._lock:
+            latest = self._tickets.get(ticket_id)
+            if latest is None:
+                raise TicketNotFound(ticket_id)
+            if latest.handoff is not None or len(latest.messages) != message_count:
+                return latest
+            update: dict[str, object] = {"triage": triage, "title": title}
+            if reply is not None and len(latest.replies) == reply_count:
+                update["replies"] = (*latest.replies, reply)
+                update["pending_reason"] = pending_reason
+            updated = latest.model_copy(update=update)
+            self._tickets[ticket_id] = updated
+            return updated
+
     def add_reply(self, ticket_id: str, reply: Reply) -> Ticket:
         with self._lock:
             latest = self._tickets.get(ticket_id)
@@ -405,13 +477,16 @@ class Inbox:
         analyzer: _Analyzer | None = None,
         *,
         store: TicketStore | None = None,
+        documents: _Documents | None = None,
         clock: _Clock | None = None,
         wait_limit: float = 30,
     ) -> None:
         self._analyzer = analyzer
         self._store = store if store is not None else _MemoryTicketStore()
+        self._documents = documents
         self._clock = clock
         self._wait_limit = wait_limit
+        self._background: set[asyncio.Task[None]] = set()
 
     def _now(self) -> datetime:
         return self._clock.now() if self._clock is not None else datetime.now(timezone.utc)
@@ -432,7 +507,114 @@ class Inbox:
         analyzer = self._analyzer
         if analyzer is None:
             raise AnalysisUnavailable
-        return await asyncio.wait_for(analyzer.draft(_transcript(messages)), self._wait_limit)
+        return await analyzer.draft(_transcript(messages))
+
+    def _track(self, task: asyncio.Task[None]) -> None:
+        self._background.add(task)
+
+        def done(finished: asyncio.Task[None]) -> None:
+            self._background.discard(finished)
+            if not finished.cancelled():
+                finished.exception()
+
+        task.add_done_callback(done)
+
+    async def _attempt(self, messages: Sequence[CustomerMessage]) -> _Settled:
+        draft = await self._draft(messages)
+        triage = _check(messages, draft)
+        page = None
+        if self._documents is not None:
+            page = await self._documents.open(_transcript(messages))
+        return _Settled(draft, triage, page)
+
+    async def _stop(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
+        stopped = await asyncio.to_thread(
+            self._store.mark_stopped_waiting, ticket_id, message_count, reply_count,
+        )
+        return self._present(stopped)
+
+    def _documented_reply(
+        self,
+        messages: Sequence[CustomerMessage],
+        settled: _Settled,
+    ) -> tuple[Reply, PendingReason | None] | None:
+        if settled.page is None:
+            if self._documents is None:
+                return None
+            return Reply(body=_cannot_answer(messages)), "没有打开的公开文档"
+        return _quoted_reply(settled.page), None
+
+    async def _publish_ready(
+        self,
+        ticket_id: str,
+        messages: Sequence[CustomerMessage],
+        reply_count: int,
+        settled: _Settled,
+    ) -> Ticket:
+        message_count = len(messages)
+        documented = self._documented_reply(messages, settled)
+        if documented is None:
+            return self._present(await asyncio.to_thread(
+                self._store.apply_analysis, ticket_id, settled.triage, settled.draft.title, message_count,
+            ))
+        reply, pending_reason = documented
+        return self._present(await asyncio.to_thread(
+            self._store.land_analysis,
+            ticket_id,
+            message_count,
+            reply_count,
+            settled.triage,
+            settled.draft.title,
+            reply,
+            pending_reason,
+        ))
+
+    async def _land_late(
+        self,
+        attempt: asyncio.Task[_Settled],
+        ticket_id: str,
+        message_count: int,
+        reply_count: int,
+    ) -> None:
+        try:
+            settled = await attempt
+        except (TimeoutError, AnalysisFailed, AnalysisUnavailable, QuoteRejected):
+            return
+        reply = None if settled.page is None else _quoted_reply(settled.page)
+        await asyncio.to_thread(
+            self._store.land_analysis,
+            ticket_id,
+            message_count,
+            reply_count,
+            settled.triage,
+            settled.draft.title,
+            reply,
+            None,
+        )
+
+    async def _resolve(self, ticket_id: str, messages: Sequence[CustomerMessage], reply_count: int) -> Ticket:
+        message_count = len(messages)
+        attempt = asyncio.create_task(self._attempt(messages))
+        try:
+            settled = await asyncio.wait_for(asyncio.shield(attempt), self._wait_limit)
+        except AnalysisFailed:
+            attempt.exception()
+            return await self._stop(ticket_id, message_count, reply_count)
+        except TimeoutError:
+            if not attempt.done():
+                stopped = await self._stop(ticket_id, message_count, reply_count)
+                self._track(asyncio.create_task(
+                    self._land_late(attempt, ticket_id, message_count, reply_count),
+                ))
+                return stopped
+            error = attempt.exception()
+            if error is None:
+                settled = attempt.result()
+            elif isinstance(error, (TimeoutError, AnalysisFailed)):
+                return await self._stop(ticket_id, message_count, reply_count)
+            else:
+                raise error
+        return await self._publish_ready(ticket_id, messages, reply_count, settled)
 
     @classmethod
     def open(
@@ -441,10 +623,17 @@ class Inbox:
         analyzer: _Analyzer | None = None,
         *,
         store: TicketStore | None = None,
+        documents: _Documents | None = None,
         clock: _Clock | None = None,
         wait_limit: float = 30,
     ) -> "Inbox":
-        inbox = cls(analyzer, store=store, clock=clock, wait_limit=wait_limit)
+        inbox = cls(
+            analyzer,
+            store=store,
+            documents=documents,
+            clock=clock,
+            wait_limit=wait_limit,
+        )
         tickets = []
         for sample in samples:
             messages = (CustomerMessage(body=sample.body),)
@@ -481,19 +670,10 @@ class Inbox:
             credential=secrets.token_urlsafe(32),
         ))
         try:
-            draft = await self._draft(messages)
-            triage = _check(messages, draft)
+            return await self._resolve(ticket.id, messages, len(ticket.replies))
         except QuoteRejected:
             await asyncio.to_thread(self._store.delete, ticket.id)
             raise
-        except (TimeoutError, AnalysisFailed):
-            stopped = await asyncio.to_thread(
-                self._store.mark_stopped_waiting, ticket.id, len(messages), len(ticket.replies),
-            )
-            return self._present(stopped)
-        return self._present(await asyncio.to_thread(
-            self._store.apply_analysis, ticket.id, triage, draft.title, len(messages),
-        ))
 
     def open_customer(self, ticket_id: str, credential: str) -> CustomerView:
         ticket = self._store.get(ticket_id)
@@ -519,19 +699,10 @@ class Inbox:
         if current.handoff is not None:
             return self._present(saved)
         try:
-            draft = await self._draft(saved.messages)
-            triage = _check(saved.messages, draft)
+            return await self._resolve(ticket_id, saved.messages, len(saved.replies))
         except QuoteRejected:
             await asyncio.to_thread(self._store.drop_last_message, ticket_id, prior_count + 1)
             raise
-        except (TimeoutError, AnalysisFailed):
-            stopped = await asyncio.to_thread(
-                self._store.mark_stopped_waiting, ticket_id, prior_count + 1, len(saved.replies),
-            )
-            return self._present(stopped)
-        return self._present(await asyncio.to_thread(
-            self._store.apply_analysis, ticket_id, triage, draft.title, prior_count + 1,
-        ))
 
     def confirm_handoff(self, ticket_id: str, owner: Owner, *, person: SupportPerson | None = None) -> Ticket:
         _signed_in(person)

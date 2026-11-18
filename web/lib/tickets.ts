@@ -42,7 +42,7 @@ const ticketSchema = z.object({
   triage: triageSchema.nullable(),
   handoff: z.object({ owner: ownerSchema }).nullable(),
   pending: z.object({
-    reason: z.literal("已经停止等待"),
+    reason: z.enum(["已经停止等待", "没有打开的公开文档"]),
     waiting_seconds: z.int().nonnegative(),
   }).nullable(),
   replies: z.array(replySchema),
