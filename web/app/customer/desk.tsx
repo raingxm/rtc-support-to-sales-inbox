@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, AudioLines } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { DeskFrame } from "../frame";
@@ -100,6 +100,7 @@ export function CustomerTicket({ ticketId, credential }: { ticketId: string; cre
   const [submission, setSubmission] = useState<Submission>({ status: "idle" });
   const [loadAttempt, setLoadAttempt] = useState(0);
   const messageField = useRef<HTMLTextAreaElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
   const pending = submission.status === "pending";
   const messageInvalid = submission.status === "invalid" && !body.trim();
 
@@ -114,6 +115,11 @@ export function CustomerTicket({ ticketId, credential }: { ticketId: string; cre
     );
     return () => controller.abort();
   }, [ticketId, credential, loadAttempt]);
+
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (thread) thread.scrollTop = thread.scrollHeight;
+  }, [view]);
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -141,68 +147,76 @@ export function CustomerTicket({ ticketId, credential }: { ticketId: string; cre
   const ticket = view.status === "ready" ? view.ticket : undefined;
 
   return (
-    <DeskFrame section="Customer">
-      <main className="frame workspace">
-        <div className="page-intro">
-          <p className="eyebrow">Customer</p>
+    <main className="customer-shell">
+      <header className="customer-head">
+        <div className="customer-measure">
+          <div className="brand">
+            <span className="brand-icon"><AudioLines size={18} /></span>
+            <strong>Relay Desk</strong>
+            <span className="brand-divider" />
+            <span className="brand-section">Customer</span>
+          </div>
           <h1>{ticket ? ticket.title : "Your ticket"}</h1>
           {ticket && (
-            <p className="ticket-meta">
+            <p className="customer-meta">
               <span className="mono">{ticket.id}</span>
               <span className="separator" />
               <span>{ticket.customer}</span>
+              <span className="separator" />
               <span>Your name is only shown on this ticket.</span>
             </p>
           )}
         </div>
+      </header>
 
-        {view.status === "loading" && <div className="notice" role="status">Loading your ticket…</div>}
-        {view.status === "missing" && <p className="notice">This ticket is not open.</p>}
-        {view.status === "error" && (
-          <div className="notice" role="alert">
-            <strong>Ticket unavailable</strong>
-            <p>Check that the desk is running, then try again.</p>
-            <button className="action" type="button" onClick={() => {
-              setView({ status: "loading" });
-              setLoadAttempt((attempt) => attempt + 1);
-            }}>Retry loading ticket</button>
-          </div>
-        )}
-
-        {ticket && (
-          <section className="customer-panel" aria-labelledby="conversation-heading">
-            <h2 className="eyebrow" id="conversation-heading">Conversation</h2>
-            <div className="conversation">
-              {ticket.messages.map((message, index) => (
-                <div className="message" key={"message-" + index}>
-                  <h3 className="eyebrow">{ticket.messages.length === 1 ? "Your message" : `Message ${index + 1}`}</h3>
-                  <p>{message.body}</p>
-                </div>
-              ))}
-              {ticket.replies.map((reply, index) => (
-                <div className="message" key={"reply-" + index}>
-                  <h3 className="eyebrow">{reply.author ?? "Relay Desk"}</h3>
-                  <p>{reply.body}</p>
-                </div>
-              ))}
+      <div className="customer-thread" ref={threadRef}>
+        <div className="customer-measure customer-log" aria-label="Conversation">
+          {view.status === "loading" && <p className="customer-status" role="status">Loading your ticket…</p>}
+          {view.status === "missing" && <p className="customer-status">This ticket is not open.</p>}
+          {view.status === "error" && (
+            <div className="customer-status" role="alert">
+              <strong>Ticket unavailable</strong>
+              <p>Check that the desk is running, then try again.</p>
+              <button className="action" type="button" onClick={() => {
+                setView({ status: "loading" });
+                setLoadAttempt((attempt) => attempt + 1);
+              }}>Retry loading ticket</button>
             </div>
-            <form className="customer-form" onSubmit={send} noValidate aria-busy={pending}>
-              <label htmlFor="follow-up">Add a message</label>
+          )}
+          {ticket?.messages.map((message, index) => (
+            <div className="message customer" key={"message-" + index}>
+              <p>{message.body}</p>
+            </div>
+          ))}
+          {ticket?.replies.map((reply, index) => (
+            <div className="message desk" key={"reply-" + index}>
+              <span className="customer-author">{reply.author ?? "Relay Desk"}</span>
+              <p>{reply.body}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {ticket && (
+        <form className="customer-dock" onSubmit={send} noValidate aria-busy={pending}>
+          <div className="customer-measure">
+            <div className="customer-compose">
+              <label className="visually-hidden" htmlFor="follow-up">Add a message</label>
               <textarea
-                id="follow-up" ref={messageField} value={body} rows={4} required disabled={pending}
+                id="follow-up" ref={messageField} value={body} rows={1} required disabled={pending}
+                placeholder="Add a message"
                 aria-invalid={messageInvalid} aria-describedby={messageInvalid ? "follow-up-error" : undefined}
                 onChange={(event) => setBody(event.target.value)}
               />
-              {messageInvalid && <p className="error-note" id="follow-up-error">Write your message.</p>}
-              <button className="action" type="submit" disabled={pending}>
-                <span>{pending ? "Sending…" : "Send message"}</span>
-                <ArrowRight size={16} />
+              <button className="customer-send" type="submit" disabled={pending} aria-label={pending ? "Sending…" : "Send message"}>
+                <ArrowRight size={18} />
               </button>
-              {submission.status === "error" && <p className="error-note" role="alert">{submission.message}</p>}
-            </form>
-          </section>
-        )}
-      </main>
-    </DeskFrame>
+            </div>
+            {messageInvalid && <p className="error-note" id="follow-up-error">Write your message.</p>}
+            {submission.status === "error" && <p className="error-note" role="alert">{submission.message}</p>}
+          </div>
+        </form>
+      )}
+    </main>
   );
 }
