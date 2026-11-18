@@ -4,7 +4,8 @@ from psycopg import Connection, IsolationLevel, connect
 from psycopg.types.json import Json
 
 from api.inbox import (
-    STOPPED_WAITING, CustomerMessage, Owner, Reply, Ticket, TicketContent, TicketNotFound, Triage,
+    STOPPED_WAITING, CustomerMessage, Owner, PendingReason, Reply, Ticket, TicketContent, TicketNotFound,
+    Triage,
 )
 
 
@@ -148,6 +149,38 @@ class PostgresTicketStore:
             stored = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
         assert stored is not None
         return _ticket(stored)
+
+    def land_analysis(
+        self,
+        ticket_id: str,
+        message_count: int,
+        reply_count: int,
+        triage: Triage,
+        title: str,
+        reply: Reply | None,
+        pending_reason: PendingReason | None,
+    ) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            if len(latest.messages) != message_count:
+                return latest
+            spoken = any(reply.author for reply in latest.replies)
+            update: dict[str, object] = {}
+            if latest.handoff is None and not spoken:
+                update["triage"] = triage
+                update["title"] = title
+            if reply is not None and not spoken and len(latest.replies) == reply_count:
+                update["replies"] = (*latest.replies, reply)
+                update["pending_reason"] = pending_reason
+            if not update:
+                return latest
+            return self._write(connection, latest.model_copy(update=update))
 
     def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
         with self._connect() as connection:

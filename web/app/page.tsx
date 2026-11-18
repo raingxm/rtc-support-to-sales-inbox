@@ -19,6 +19,7 @@ const kindLabels = {
 
 const pendingLabels = {
   "stopped-waiting": "Stopped waiting",
+  "documentation-unopened": "No documentation page",
 };
 
 type InboxState =

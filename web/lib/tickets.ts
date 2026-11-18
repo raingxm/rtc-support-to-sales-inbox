@@ -42,7 +42,7 @@ const ticketSchema = z.object({
   triage: triageSchema.nullable(),
   handoff: z.object({ owner: ownerSchema }).nullable(),
   pending: z.object({
-    reason: z.literal("stopped-waiting"),
+    reason: z.enum(["stopped-waiting", "documentation-unopened"]),
     waiting_seconds: z.int().nonnegative(),
   }).nullable(),
   replies: z.array(replySchema),

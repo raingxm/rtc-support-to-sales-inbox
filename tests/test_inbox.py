@@ -11,8 +11,8 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from api.inbox import (
-    AnalysisFailed, Inbox, Letter, NotAuthenticated, QuoteRejected, SAMPLES, SupportPerson, Ticket,
-    TicketNotFound, _Draft, quote_text,
+    AnalysisFailed, DocumentationPage, Inbox, Letter, NotAuthenticated, QuoteRejected, SAMPLES,
+    SupportPerson, Ticket, TicketNotFound, _Draft, quote_text,
 )
 from api.main import _configured_inbox, load_local_env
 from api.model_analyzer import configured_analyzer
@@ -619,6 +619,614 @@ class SupportSignInTest(TestCase):
         self.assertEqual(listed[0].id, "RTC-1042")
         assigned = inbox.confirm_handoff("RTC-1042", "Maya Chen", person=SUPPORT)
         self.assertEqual(assigned.handoff.owner, "Maya Chen")
+
+
+class LateQuotedReplyTest(IsolatedAsyncioTestCase):
+    async def test_a_late_quoted_result_is_an_unsigned_reply_on_both_entrances_and_leaves_pending(self):
+        release = asyncio.Event()
+        quote = "Cloud recording can be stored in COS or VOD."
+        page = "https://trtc.io/document/45169"
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                await release.wait()
+                return _Draft(
+                    title="Cloud recording",
+                    kind="support",
+                    summary="The opened page says where cloud recording can be stored.",
+                    support_steps=["Open the cloud recording page."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                await release.wait()
+                return DocumentationPage(url=page, quote=quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        body = "Do you support cloud recording?"
+        ticket = await inbox.submit(Letter(customer="Cedarline Media", body=body))
+
+        self.assertEqual([message.body for message in ticket.messages], [body])
+        self.assertEqual(ticket.replies, ())
+        self.assertIsNotNone(ticket.pending)
+        assert ticket.pending is not None
+        self.assertEqual(ticket.pending.reason, "stopped-waiting")
+        self.assertIsNone(ticket.triage)
+
+        release.set()
+        await self._wait_until(lambda: len(self._support(inbox, ticket.id).replies) == 1)
+
+        expected = (None, "Cloud recording can be stored in COS or VOD.\nhttps://trtc.io/document/45169")
+        support = inbox.get(ticket.id, SUPPORT)
+        assert support is not None
+        self.assertIsNone(support.pending)
+        self.assertEqual(support.triage.summary, "The opened page says where cloud recording can be stored.")
+        self.assertEqual([(reply.author, reply.body) for reply in support.replies], [expected])
+        customer = inbox.open_customer(ticket.id, ticket.credential)
+        self.assertEqual([(reply.author, reply.body) for reply in customer.replies], [expected])
+        self.assertNotIn("pending", customer.model_dump())
+        self.assertNotIn("Riley Cho", customer.model_dump_json())
+
+    async def test_an_unopened_page_replies_that_it_cannot_answer_and_keeps_the_wait(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                return _Draft(
+                    title="Cloud recording",
+                    kind="clarify",
+                    summary="The documentation page did not open.",
+                    support_steps=[],
+                    evidence=[],
+                    questions=["When do you want to start the pilot?"],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> None:
+                started.set()
+                await release.wait()
+                return None
+
+        clock = _Clock()
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), clock=clock, wait_limit=1,
+        )
+        body = "Do you support cloud recording?"
+        submitting = asyncio.create_task(inbox.submit(Letter(customer="Cedarline Media", body=body)))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        clock.advance(30)
+        release.set()
+        ticket = await submitting
+
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in ticket.replies],
+            [(None, "I can't answer this.")],
+        )
+        self.assertNotIn("pilot", ticket.replies[0].body.lower())
+        self.assertNotIn("migration", ticket.replies[0].body.lower())
+        self.assertIsNotNone(ticket.pending)
+        assert ticket.pending is not None
+        self.assertEqual(ticket.pending.reason, "documentation-unopened")
+        self.assertEqual(ticket.pending.waiting_seconds, 30)
+
+        clock.advance(60)
+        support = self._support(inbox, ticket.id)
+        assert support.pending is not None
+        self.assertEqual(support.pending.reason, "documentation-unopened")
+        self.assertEqual(support.pending.waiting_seconds, 90)
+        customer = inbox.open_customer(ticket.id, ticket.credential)
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in customer.replies],
+            [(None, "I can't answer this.")],
+        )
+        self.assertNotIn("pending", customer.model_dump())
+
+        inbox.reply(ticket.id, "I'll look up the recording page.", person=SUPPORT)
+        self.assertIsNone(self._support(inbox, ticket.id).pending)
+
+        chinese = await inbox.submit(Letter(customer="北风", body="云端录制可以存到对象存储吗？"))
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in chinese.replies],
+            [(None, "这次答不了。")],
+        )
+        self.assertIsNotNone(chinese.pending)
+        assert chinese.pending is not None
+        self.assertEqual(chinese.pending.reason, "documentation-unopened")
+
+    async def test_waiting_follows_the_latest_message_when_a_later_page_also_stays_unopened(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                return _Draft(
+                    title="Cloud recording",
+                    kind="clarify",
+                    summary="The documentation page did not open.",
+                    support_steps=[],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> None:
+                return None
+
+        clock = _Clock()
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), clock=clock, wait_limit=1,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        clock.advance(600)
+        updated = await inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        )
+        clock.advance(40)
+
+        support = self._support(inbox, opened.id)
+        assert support.pending is not None
+        self.assertEqual([message.body for message in support.messages], [
+            "Do you support cloud recording?",
+            "Can those recordings be stored on AWS?",
+        ])
+        self.assertEqual(
+            [reply.body for reply in support.replies],
+            ["I can't answer this.", "I can't answer this."],
+        )
+        self.assertEqual(support.pending.reason, "documentation-unopened")
+        self.assertEqual(support.pending.waiting_seconds, 40)
+        self.assertEqual(updated.pending.waiting_seconds, 0)
+        customer = inbox.open_customer(opened.id, opened.credential)
+        self.assertEqual([reply.author for reply in customer.replies], [None, None])
+        self.assertNotIn("pending", customer.model_dump())
+
+    async def test_a_late_result_without_a_quote_stays_out_and_keeps_the_wait(self):
+        release = asyncio.Event()
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                await release.wait()
+                return _Draft(
+                    title="No page",
+                    kind="support",
+                    summary="This late reading has no documentation sentence.",
+                    support_steps=["Ask for the SDK version."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> None:
+                await release.wait()
+                return None
+
+        clock = _Clock()
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), clock=clock, wait_limit=0.05,
+        )
+        ticket = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        clock.advance(25)
+        release.set()
+        await self._wait_until(
+            lambda: (landed := self._support(inbox, ticket.id).triage) is not None
+            and landed.summary == "This late reading has no documentation sentence.",
+        )
+
+        def still_waiting() -> None:
+            support = self._support(inbox, ticket.id)
+            assert support.pending is not None and support.triage is not None
+            self.assertEqual(support.replies, ())
+            self.assertEqual(support.triage.summary, "This late reading has no documentation sentence.")
+            self.assertEqual(support.pending.reason, "stopped-waiting")
+            self.assertEqual(support.pending.waiting_seconds, 25)
+            customer = inbox.open_customer(ticket.id, ticket.credential)
+            self.assertEqual(customer.replies, ())
+
+        await self._stays(still_waiting)
+
+    async def test_a_late_result_without_a_quote_updates_the_reading_and_stays_unsent(self):
+        release = asyncio.Event()
+        first_quote = "Cloud recording can be stored in COS or VOD."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    await release.wait()
+                    return _Draft(
+                        title="Unread follow-up",
+                        kind="support",
+                        summary="This late reading has no documentation sentence.",
+                        support_steps=[],
+                        evidence=[],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Cloud recording",
+                    kind="support",
+                    summary="First reading.",
+                    support_steps=["Open the cloud recording page."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage | None:
+                if "\n\n" in body:
+                    await release.wait()
+                    return None
+                return DocumentationPage(url="https://trtc.io/document/45169", quote=first_quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        followed = await inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        )
+        self.assertEqual(followed.triage.summary, "First reading.")
+        self.assertEqual(followed.pending.reason, "stopped-waiting")
+        release.set()
+        await self._wait_until(
+            lambda: self._support(inbox, opened.id).triage.summary
+            == "This late reading has no documentation sentence.",
+        )
+
+        def reading_arrives_without_a_reply() -> None:
+            support = self._support(inbox, opened.id)
+            assert support.pending is not None and support.triage is not None
+            self.assertEqual(support.triage.summary, "This late reading has no documentation sentence.")
+            self.assertEqual(
+                [(reply.author, reply.body) for reply in support.replies],
+                [(None, "Cloud recording can be stored in COS or VOD.\nhttps://trtc.io/document/45169")],
+            )
+            self.assertEqual(support.pending.reason, "stopped-waiting")
+
+        await self._stays(reading_arrives_without_a_reply)
+
+    async def test_a_late_result_for_an_earlier_conversation_is_dropped_with_its_reading(self):
+        stale_release = asyncio.Event()
+        latest_release = asyncio.Event()
+        first_quote = "Cloud recording can be stored in COS or VOD."
+        stale_quote = "Recordings can be stored on AWS."
+        latest_quote = "A recording task can mix audio from several streams."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                gaps = body.count("\n\n")
+                if gaps == 1:
+                    await stale_release.wait()
+                    return _Draft(
+                        title="Stale reading",
+                        kind="support",
+                        summary="Stale reading.",
+                        support_steps=[],
+                        evidence=[],
+                        questions=[],
+                    )
+                if gaps >= 2:
+                    await latest_release.wait()
+                    return _Draft(
+                        title="Latest reading",
+                        kind="support",
+                        summary="Latest reading.",
+                        support_steps=[],
+                        evidence=[],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Cloud recording",
+                    kind="support",
+                    summary="First reading.",
+                    support_steps=["Open the cloud recording page."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                gaps = body.count("\n\n")
+                if gaps == 1:
+                    await stale_release.wait()
+                    return DocumentationPage(url="https://trtc.io/document/46960", quote=stale_quote)
+                if gaps >= 2:
+                    await latest_release.wait()
+                    return DocumentationPage(url="https://trtc.io/document/45169", quote=latest_quote)
+                return DocumentationPage(url="https://trtc.io/document/45169", quote=first_quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        self.assertEqual(self._support(inbox, opened.id).triage.summary, "First reading.")
+        await inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        )
+        await inbox.append_customer_message(
+            opened.id, "Can one task mix several audio streams?", credential=opened.credential,
+        )
+        stale_release.set()
+
+        def keeps_the_first_reading() -> None:
+            support = self._support(inbox, opened.id)
+            self.assertEqual(support.triage.summary, "First reading.")
+            self.assertNotIn(stale_quote, [reply.body for reply in support.replies])
+            customer = inbox.open_customer(opened.id, opened.credential)
+            self.assertNotIn(stale_quote, [reply.body for reply in customer.replies])
+
+        await self._stays(keeps_the_first_reading)
+
+        latest_release.set()
+        await self._wait_until(
+            lambda: any(latest_quote in reply.body for reply in self._support(inbox, opened.id).replies),
+        )
+        support = self._support(inbox, opened.id)
+        self.assertEqual(support.triage.summary, "Latest reading.")
+        self.assertIsNone(support.pending)
+        self.assertEqual(
+            [reply.body for reply in support.replies],
+            [
+                "Cloud recording can be stored in COS or VOD.\nhttps://trtc.io/document/45169",
+                "A recording task can mix audio from several streams.\nhttps://trtc.io/document/45169",
+            ],
+        )
+        self.assertNotIn(stale_quote, [reply.body for reply in support.replies])
+        self.assertEqual([reply.author for reply in support.replies], [None, None])
+
+    async def test_a_late_quote_for_the_first_message_leaves_an_empty_reading_empty(self):
+        first_release = asyncio.Event()
+        second_release = asyncio.Event()
+        stale_quote = "Cloud recording can be stored in COS or VOD."
+        current_quote = "Recordings can be stored on AWS."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    await second_release.wait()
+                    return _Draft(
+                        title="Current reading",
+                        kind="support",
+                        summary="Current reading.",
+                        support_steps=[],
+                        evidence=[],
+                        questions=[],
+                    )
+                await first_release.wait()
+                return _Draft(
+                    title="Stale reading",
+                    kind="support",
+                    summary="Stale reading.",
+                    support_steps=[],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                if "\n\n" in body:
+                    await second_release.wait()
+                    return DocumentationPage(url="https://trtc.io/document/46960", quote=current_quote)
+                await first_release.wait()
+                return DocumentationPage(url="https://trtc.io/document/45169", quote=stale_quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        self.assertIsNone(opened.triage)
+        await inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        )
+        first_release.set()
+
+        def stays_empty() -> None:
+            support = self._support(inbox, opened.id)
+            self.assertIsNone(support.triage)
+            self.assertNotIn(stale_quote, [reply.body for reply in support.replies])
+            self.assertEqual(support.replies, ())
+
+        await self._stays(stays_empty)
+
+        second_release.set()
+        await self._wait_until(lambda: len(self._support(inbox, opened.id).replies) == 1)
+        support = self._support(inbox, opened.id)
+        self.assertEqual(support.triage.summary, "Current reading.")
+        self.assertEqual(support.replies[0].body, "Recordings can be stored on AWS.\nhttps://trtc.io/document/46960")
+        self.assertIsNone(support.replies[0].author)
+        self.assertNotIn(stale_quote, support.replies[0].body)
+
+    async def test_a_late_quote_after_a_support_reply_stays_out_of_the_conversation(self):
+        release = asyncio.Event()
+        quote = "Cloud recording can be stored in COS or VOD."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                await release.wait()
+                return _Draft(
+                    title="Cloud recording",
+                    kind="support",
+                    summary="Late reading.",
+                    support_steps=["Open the cloud recording page."],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                await release.wait()
+                return DocumentationPage(url="https://trtc.io/document/45169", quote=quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        ticket = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        inbox.reply(ticket.id, "I'll look up the recording page.", person=SUPPORT)
+        release.set()
+
+        def only_the_signed_reply() -> None:
+            support = self._support(inbox, ticket.id)
+            self.assertIsNone(support.pending)
+            self.assertIsNone(support.triage)
+            expected = [("Riley Cho", "I'll look up the recording page.")]
+            self.assertEqual([(reply.author, reply.body) for reply in support.replies], expected)
+            customer = inbox.open_customer(ticket.id, ticket.credential)
+            self.assertEqual([(reply.author, reply.body) for reply in customer.replies], expected)
+            self.assertNotIn(quote, customer.model_dump_json())
+
+        await self._stays(only_the_signed_reply)
+
+    async def test_a_later_message_after_a_support_reply_does_not_receive_a_late_quote(self):
+        release = asyncio.Event()
+        quote = "Recordings can be stored on AWS."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    await release.wait()
+                else:
+                    raise AnalysisFailed
+                return _Draft(
+                    title="Follow-up",
+                    kind="support",
+                    summary="Late follow-up.",
+                    support_steps=[],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                await release.wait()
+                return DocumentationPage(url="https://trtc.io/document/46960", quote=quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        inbox.reply(opened.id, "I'll look up the recording page.", person=SUPPORT)
+        await inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        )
+        release.set()
+
+        def only_the_signed_reply() -> None:
+            support = self._support(inbox, opened.id)
+            assert support.pending is not None
+            self.assertIsNone(support.triage)
+            self.assertEqual(support.pending.reason, "stopped-waiting")
+            self.assertEqual(
+                [(reply.author, reply.body) for reply in support.replies],
+                [("Riley Cho", "I'll look up the recording page.")],
+            )
+            customer = inbox.open_customer(opened.id, opened.credential)
+            self.assertNotIn(quote, customer.model_dump_json())
+
+        await self._stays(only_the_signed_reply)
+
+    async def test_a_confirmed_handoff_still_receives_a_late_quote(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        late_quote = "Recordings can be stored on AWS."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    started.set()
+                    await release.wait()
+                    return _Draft(
+                        title="Follow-up",
+                        kind="support",
+                        summary="This reading must not replace the confirmed one.",
+                        support_steps=[],
+                        evidence=[],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Pilot",
+                    kind="mixed",
+                    summary="First reading.",
+                    support_steps=[],
+                    evidence=["launch a pilot next month"],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                if "\n\n" in body:
+                    await release.wait()
+                    return DocumentationPage(url="https://trtc.io/document/46960", quote=late_quote)
+                return DocumentationPage(
+                    url="https://trtc.io/document/45169",
+                    quote="Cloud recording can be stored in COS or VOD.",
+                )
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Harborline Labs",
+            body="We want to launch a pilot next month.",
+        ))
+        appending = asyncio.create_task(inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        ))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        followed = await appending
+        assert followed.pending is not None
+        self.assertEqual(followed.pending.reason, "stopped-waiting")
+        assigned = inbox.confirm_handoff(opened.id, "Maya Chen", person=SUPPORT)
+        release.set()
+        await self._wait_until(
+            lambda: any(late_quote in reply.body for reply in self._support(inbox, opened.id).replies),
+        )
+
+        support = self._support(inbox, opened.id)
+        assert support.handoff is not None and support.triage is not None
+        self.assertEqual(support.handoff.owner, "Maya Chen")
+        self.assertEqual(support.triage, assigned.triage)
+        self.assertIsNone(support.pending)
+        self.assertEqual([reply.author for reply in support.replies], [None, None])
+        self.assertEqual(support.replies[1].body, "Recordings can be stored on AWS.\nhttps://trtc.io/document/46960")
+        customer = inbox.open_customer(opened.id, opened.credential)
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in customer.replies],
+            [(reply.author, reply.body) for reply in support.replies],
+        )
+
+    def _support(self, inbox: Inbox, ticket_id: str) -> Ticket:
+        support = inbox.get(ticket_id, SUPPORT)
+        self.assertIsNotNone(support)
+        assert support is not None
+        return support
+
+    async def _wait_until(self, ready) -> None:
+        deadline = asyncio.get_running_loop().time() + 2
+        while asyncio.get_running_loop().time() < deadline:
+            if ready():
+                return
+            await asyncio.sleep(0.01)
+        self.fail("the ticket did not settle")
+
+    async def _stays(self, check) -> None:
+        deadline = asyncio.get_running_loop().time() + 0.5
+        while asyncio.get_running_loop().time() < deadline:
+            check()
+            await asyncio.sleep(0.01)
 
 
 class _Clock:

@@ -9,7 +9,8 @@ from psycopg import connect, sql
 from psycopg.conninfo import make_conninfo
 
 from api.inbox import (
-    HandoffRejected, Inbox, Letter, Owner, QuoteRejected, SAMPLES, SupportPerson, TicketNotFound, _Draft,
+    DocumentationPage, HandoffRejected, Inbox, Letter, Owner, QuoteRejected, SAMPLES, SupportPerson,
+    TicketNotFound, _Draft,
 )
 from api.postgres import PostgresTicketStore
 
@@ -156,6 +157,71 @@ class PostgresInboxTest(IsolatedAsyncioTestCase):
             [(reply.author, reply.body) for reply in seen.replies],
             [(_SUPPORT.name, "I'll check the recording failure.")],
         )
+
+    async def test_reopening_keeps_a_quoted_reply_and_an_unopened_page(self) -> None:
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                return _Draft(
+                    title="Cloud recording",
+                    kind="support",
+                    summary="Read the opened page." if "AWS" not in body else "The page did not open.",
+                    support_steps=[],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage | None:
+                if "AWS" in body:
+                    return None
+                return DocumentationPage(
+                    url="https://trtc.io/document/45169",
+                    quote="Cloud recording can be stored in COS or VOD.",
+                )
+
+        clock = _Clock()
+        inbox = Inbox.open(
+            SAMPLES,
+            analyzer=Analyzer(),
+            documents=Documents(),
+            store=PostgresTicketStore(self.dsn),
+            clock=clock,
+        )
+        quoted = await inbox.submit(Letter(customer="Cypress Video", body="Do you support cloud recording?"))
+        unanswered = await inbox.submit(Letter(
+            customer="Northwind Studio", body="Can recordings be stored on AWS?",
+        ))
+        clock.advance(45)
+
+        reopened = Inbox.open(
+            SAMPLES,
+            analyzer=Analyzer(),
+            documents=Documents(),
+            store=PostgresTicketStore(self.dsn),
+            clock=clock,
+        )
+        kept = reopened.get(quoted.id, _SUPPORT)
+        self.assertIsNotNone(kept)
+        assert kept is not None and kept.triage is not None
+        self.assertIsNone(kept.pending)
+        self.assertEqual(kept.triage.summary, "Read the opened page.")
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in kept.replies],
+            [(None, "Cloud recording can be stored in COS or VOD.\nhttps://trtc.io/document/45169")],
+        )
+        customer = reopened.open_customer(quoted.id, quoted.credential)
+        self.assertEqual(customer.replies, kept.replies)
+        self.assertNotIn("pending", customer.model_dump())
+
+        waiting = reopened.get(unanswered.id, _SUPPORT)
+        self.assertIsNotNone(waiting)
+        assert waiting is not None and waiting.pending is not None
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in waiting.replies],
+            [(None, "I can't answer this.")],
+        )
+        self.assertEqual(waiting.pending.reason, "documentation-unopened")
+        self.assertEqual(waiting.pending.waiting_seconds, 45)
 
 
 class _Clock:
