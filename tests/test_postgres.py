@@ -111,6 +111,39 @@ class PostgresInboxTest(IsolatedAsyncioTestCase):
             rows = connection.execute("SELECT ticket_number, owner FROM rtc_handoffs").fetchall()
         self.assertEqual(rows, [(1043, first.owner)])
 
+    async def test_reopening_keeps_who_confirmed_who_withdrew_and_who_handed_back(self) -> None:
+        inbox = self.open_inbox()
+        ticket = await inbox.submit(Letter(customer="Cypress Video", body=_PILOT))
+        assigned = inbox.confirm_handoff(ticket.id, "Maya Chen", person=_SUPPORT)
+        self.assertEqual(assigned.confirmed_by, _SUPPORT.name)
+        withdrawn = inbox.withdraw_handoff(ticket.id, person=SupportPerson(name="Avery Quinn"))
+        self.assertIsNone(withdrawn.handoff)
+        self.assertEqual(withdrawn.confirmed_by, _SUPPORT.name)
+        self.assertEqual(withdrawn.withdrawn_by, "Avery Quinn")
+        self.assertEqual(withdrawn.replies, ())
+
+        reopened = self.open_inbox()
+        stored = reopened.get(ticket.id, _SUPPORT)
+        self.assertEqual(stored, withdrawn)
+        again = reopened.confirm_handoff(ticket.id, "Jordan Lee", person=_SUPPORT)
+        self.assertEqual(again.handoff.owner, "Jordan Lee")
+        self.assertEqual(again.confirmed_by, _SUPPORT.name)
+        self.assertIsNone(again.withdrawn_by)
+
+        spoken = reopened.reply(ticket.id, "I'll check the recording failure.", person=_SUPPORT)
+        self.assertIs(spoken.taken_over, True)
+        handed = reopened.hand_back(ticket.id, person=SupportPerson(name="Avery Quinn"))
+        self.assertIs(handed.taken_over, False)
+        self.assertEqual(handed.handed_back_by, "Avery Quinn")
+        self.assertEqual([reply.author for reply in handed.replies], [_SUPPORT.name])
+        customer = reopened.open_customer(ticket.id, ticket.credential)
+        self.assertNotIn("Avery Quinn", customer.model_dump_json())
+        self.assertNotIn("Maya Chen", customer.model_dump_json())
+        self.assertNotIn("taken_over", customer.model_dump())
+
+        kept = self.open_inbox().get(ticket.id, _SUPPORT)
+        self.assertEqual(kept, handed)
+
     async def test_reopening_keeps_a_timed_out_ticket_its_wait_and_a_signed_reply(self) -> None:
         class Hanging:
             async def draft(self, body: str) -> _Draft:

@@ -40,8 +40,16 @@ test("routes three RTC tickets and keeps support open after a confirmed handoff"
   await confirm.click();
   const response = await saved;
   expect(response.ok()).toBeTruthy();
-  expect(await response.json()).toMatchObject({ status: "open", handoff: { owner: "Maya Chen" } });
+  const confirmed = await response.json();
+  expect(confirmed).toMatchObject({
+    status: "open",
+    handoff: { owner: "Maya Chen" },
+    confirmed_by: "Riley Cho",
+    withdrawn_by: null,
+    taken_over: false,
+  });
   await expect(page.getByText("Follow-up assigned to Maya Chen", { exact: true })).toBeVisible();
+  await expect(page.getByText("Confirmed by Riley Cho", { exact: true })).toBeVisible();
 
   const repeated = await request.post("/api/tickets/RTC-1042/handoff", {
     headers: supportHeaders,
@@ -57,6 +65,47 @@ test("routes three RTC tickets and keeps support open after a confirmed handoff"
   await expect(page.getByText("Follow-up assigned to Maya Chen", { exact: true })).toBeVisible();
   const hasOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   expect(hasOverflow).toBe(false);
+
+  const customer = await page.context().newPage();
+  await customer.setViewportSize({ width: 390, height: 844 });
+  await customer.goto("/customer/" + confirmed.id + "/" + confirmed.credential);
+  await expect(customer.getByText("Maya Chen")).toHaveCount(0);
+  await expect(customer.getByText("Riley Cho")).toHaveCount(0);
+  await expect(customer.getByText(/confirmed|withdrawn|solutions engineer/i)).toHaveCount(0);
+
+  const withdrawnResponse = page.waitForResponse((reply) =>
+    new URL(reply.url()).pathname === "/api/tickets/RTC-1042/withdrawal" &&
+    reply.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "Withdraw handoff" }).click();
+  const withdrawn = await (await withdrawnResponse).json();
+  expect(withdrawn).toMatchObject({
+    handoff: null,
+    confirmed_by: "Riley Cho",
+    withdrawn_by: "Riley Cho",
+    replies: confirmed.replies,
+  });
+  await expect(page.getByText("Confirmed by Riley Cho", { exact: true })).toBeVisible();
+  await expect(page.getByText("Withdrawn by Riley Cho", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /RTC-1042|Harborline Labs/ })).toContainText("Handoff withdrawn");
+
+  await page.getByRole("combobox", { name: /assign|engineer/i }).selectOption({ label: "Jordan Lee" });
+  await page.getByRole("button", { name: /confirm handoff/i }).click();
+  await expect(page.getByText("Follow-up assigned to Jordan Lee", { exact: true })).toBeVisible();
+  await expect(page.getByText("Confirmed by Riley Cho", { exact: true })).toBeVisible();
+  await expect(page.getByText("Withdrawn by Riley Cho")).toHaveCount(0);
+
+  await page.getByLabel("Reply to the customer").fill("I'll check the recording time.");
+  await page.getByRole("button", { name: "Send reply" }).click();
+  await expect(page.getByRole("heading", { name: "Riley Cho" })).toBeVisible();
+  await expect(page.getByText("With support", { exact: true })).toBeVisible();
+  await expect(page.getByText(/taken over by/i)).toHaveCount(0);
+  await page.getByRole("button", { name: "Hand back" }).click();
+  await expect(page.getByText("Handed back by Riley Cho", { exact: true })).toBeVisible();
+  await expect(page.getByText("With support", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("I'll check the recording time.")).toBeVisible();
+  const stillFits = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+  expect(stillFits).toBe(false);
 });
 
 test("checks a new letter against the source before adding it to the queue", async ({ page, request }, testInfo) => {

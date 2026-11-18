@@ -21,26 +21,31 @@ CREATE TABLE IF NOT EXISTS rtc_tickets (
 _CREATE_HANDOFFS = """
 CREATE TABLE IF NOT EXISTS rtc_handoffs (
     ticket_number bigint PRIMARY KEY REFERENCES rtc_tickets(number),
-    owner text NOT NULL
+    owner text,
+    confirmed_by text,
+    withdrawn_by text
 )
 """
 
 _SELECT_TICKETS = """
-SELECT t.id, t.sample_order, t.content, h.owner
+SELECT t.id, t.sample_order, t.content, h.owner, h.confirmed_by, h.withdrawn_by
 FROM rtc_tickets AS t
 LEFT JOIN rtc_handoffs AS h ON h.ticket_number = t.number
 """
 
-_TicketRow = tuple[str, int | None, dict[str, object], str | None]
+_TicketRow = tuple[str, int | None, dict[str, object], str | None, str | None, str | None]
 
 
 def _ticket(row: _TicketRow) -> Ticket:
-    ticket_id, sample_order, content, owner = row
+    ticket_id, sample_order, content, owner, confirmed_by, withdrawn_by = row
+    standing = owner is not None
     return Ticket.model_validate({
         **content,
         "id": ticket_id,
         "origin": "sample" if sample_order is not None else "live",
-        "handoff": None if owner is None else {"owner": owner},
+        "handoff": {"owner": owner} if standing else None,
+        "confirmed_by": confirmed_by,
+        "withdrawn_by": None if standing else withdrawn_by,
     })
 
 
@@ -58,6 +63,9 @@ class PostgresTicketStore:
             connection.execute("SELECT pg_advisory_xact_lock(7492060001042)")
             connection.execute(_CREATE_TICKETS)
             connection.execute(_CREATE_HANDOFFS)
+            connection.execute("ALTER TABLE rtc_handoffs ADD COLUMN IF NOT EXISTS confirmed_by text")
+            connection.execute("ALTER TABLE rtc_handoffs ADD COLUMN IF NOT EXISTS withdrawn_by text")
+            connection.execute("ALTER TABLE rtc_handoffs ALTER COLUMN owner DROP NOT NULL")
             for position, sample in enumerate(samples):
                 connection.execute(
                     """
@@ -87,7 +95,7 @@ class PostgresTicketStore:
     def append(self, content: TicketContent) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
-                "INSERT INTO rtc_tickets (content) VALUES (%s) RETURNING id, sample_order, content, NULL",
+                "INSERT INTO rtc_tickets (content) VALUES (%s) RETURNING id, sample_order, content, NULL, NULL, NULL",
                 (Json(content.model_dump(mode="json")),),
             ).fetchone()
             assert row is not None
@@ -207,9 +215,21 @@ class PostgresTicketStore:
             return self._write(connection, latest.model_copy(update={
                 "replies": (*latest.replies, reply),
                 "pending_reason": None,
+                "taken_over": True,
             }))
 
-    def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
+    def hand_back(self, ticket_id: str, handed_back_by: str) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            return self._write(connection, latest.hand_back(handed_back_by))
+
+    def confirm_handoff(self, ticket_id: str, owner: Owner, confirmed_by: str) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
                 _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
@@ -218,18 +238,44 @@ class PostgresTicketStore:
             if row is None:
                 raise TicketNotFound(ticket_id)
             ticket = _ticket(row)
-            assigned = ticket.assign_handoff(owner)
+            assigned = ticket.assign_handoff(owner, confirmed_by)
             if assigned is ticket:
                 return ticket
 
             connection.execute(
                 """
-                INSERT INTO rtc_handoffs (ticket_number, owner)
-                SELECT number, %s FROM rtc_tickets WHERE id = %s
-                ON CONFLICT (ticket_number) DO NOTHING
+                INSERT INTO rtc_handoffs (ticket_number, owner, confirmed_by, withdrawn_by)
+                SELECT number, %s, %s, NULL FROM rtc_tickets WHERE id = %s
+                ON CONFLICT (ticket_number) DO UPDATE
+                SET owner = EXCLUDED.owner,
+                    confirmed_by = EXCLUDED.confirmed_by,
+                    withdrawn_by = NULL
+                WHERE rtc_handoffs.owner IS NULL
                 """,
-                (owner, ticket_id),
+                (owner, confirmed_by, ticket_id),
             )
             confirmed = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
             assert confirmed is not None
             return _ticket(confirmed)
+
+    def withdraw_handoff(self, ticket_id: str, withdrawn_by: str) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            ticket = _ticket(row)
+            ticket.withdraw_handoff(withdrawn_by)
+            connection.execute(
+                """
+                UPDATE rtc_handoffs
+                SET owner = NULL, withdrawn_by = %s
+                WHERE ticket_number = (SELECT number FROM rtc_tickets WHERE id = %s)
+                """,
+                (withdrawn_by, ticket_id),
+            )
+            stored = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
+            assert stored is not None
+            return _ticket(stored)

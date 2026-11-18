@@ -41,6 +41,10 @@ const ticketSchema = z.object({
   origin: z.enum(["sample", "live"]),
   triage: triageSchema.nullable(),
   handoff: z.object({ owner: ownerSchema }).nullable(),
+  confirmed_by: z.string().nullable(),
+  withdrawn_by: z.string().nullable(),
+  taken_over: z.boolean(),
+  handed_back_by: z.string().nullable(),
   pending: z.object({
     reason: z.enum(["stopped-waiting", "documentation-unopened"]),
     waiting_seconds: z.int().nonnegative(),
@@ -176,6 +180,32 @@ export async function createHandoff(ticketId: string, owner: Owner) {
     throw new SupportSignInRequired();
   }
   if (!response.ok) throw new Error("Could not confirm handoff");
+  return ticketSchema.parse(await response.json());
+}
+
+export async function withdrawHandoff(ticketId: string) {
+  const response = await fetch(
+    "/api/tickets/" + encodeURIComponent(ticketId) + "/withdrawal",
+    { method: "POST", headers: supportHeaders(), signal: AbortSignal.timeout(8000) },
+  );
+  if (response.status === 401) {
+    clearSupportSession();
+    throw new SupportSignInRequired();
+  }
+  if (!response.ok) throw new Error("Could not withdraw handoff");
+  return ticketSchema.parse(await response.json());
+}
+
+export async function handBack(ticketId: string) {
+  const response = await fetch(
+    "/api/tickets/" + encodeURIComponent(ticketId) + "/handback",
+    { method: "POST", headers: supportHeaders(), signal: AbortSignal.timeout(8000) },
+  );
+  if (response.status === 401) {
+    clearSupportSession();
+    throw new SupportSignInRequired();
+  }
+  if (!response.ok) throw new Error("Could not hand this back");
   return ticketSchema.parse(await response.json());
 }
 

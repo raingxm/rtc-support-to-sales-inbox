@@ -11,8 +11,8 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from api.inbox import (
-    AnalysisFailed, DocumentationPage, Inbox, Letter, NotAuthenticated, QuoteRejected, SAMPLES,
-    SupportPerson, Ticket, TicketNotFound, _Draft, quote_text,
+    AnalysisFailed, DocumentationPage, HandbackRejected, Inbox, Letter, NotAuthenticated, QuoteRejected, SAMPLES,
+    SolutionEngineerRejected, SupportPerson, Ticket, TicketNotFound, _Draft, quote_text,
 )
 from api.main import _configured_inbox, load_local_env
 from api.model_analyzer import configured_analyzer
@@ -619,6 +619,153 @@ class SupportSignInTest(TestCase):
         self.assertEqual(listed[0].id, "RTC-1042")
         assigned = inbox.confirm_handoff("RTC-1042", "Maya Chen", person=SUPPORT)
         self.assertEqual(assigned.handoff.owner, "Maya Chen")
+
+
+class SignedActTest(TestCase):
+    def test_confirming_records_who_confirmed_and_the_solutions_engineer_without_a_reply(self):
+        inbox = Inbox.open(SAMPLES)
+        before = inbox.get("RTC-1042", SUPPORT)
+        assert before is not None
+
+        assigned = inbox.confirm_handoff("RTC-1042", "Maya Chen", person=SUPPORT)
+
+        self.assertEqual(assigned.handoff.owner, "Maya Chen")
+        self.assertEqual(assigned.confirmed_by, "Riley Cho")
+        self.assertEqual(assigned.replies, before.replies)
+        customer = inbox.open_customer("RTC-1042", before.credential)
+        seen = customer.model_dump()
+        self.assertEqual(customer.replies, before.replies)
+        self.assertNotIn("handoff", seen)
+        self.assertNotIn("confirmed_by", seen)
+        self.assertNotIn("Maya Chen", customer.model_dump_json())
+        self.assertNotIn("Riley Cho", customer.model_dump_json())
+
+    def test_withdrawing_records_who_and_keeps_the_confirmation_off_the_customer_entrance(self):
+        inbox = Inbox.open(SAMPLES)
+        confirmed = inbox.confirm_handoff("RTC-1042", "Maya Chen", person=SUPPORT)
+        withdrawer = SupportPerson(name="Avery Quinn")
+
+        withdrawn = inbox.withdraw_handoff("RTC-1042", person=withdrawer)
+
+        self.assertIsNone(withdrawn.handoff)
+        self.assertEqual(withdrawn.confirmed_by, "Riley Cho")
+        self.assertEqual(withdrawn.withdrawn_by, "Avery Quinn")
+        self.assertEqual(withdrawn.replies, confirmed.replies)
+        customer = inbox.open_customer("RTC-1042", confirmed.credential)
+        seen = customer.model_dump()
+        self.assertNotIn("handoff", seen)
+        self.assertNotIn("confirmed_by", seen)
+        self.assertNotIn("withdrawn_by", seen)
+        text = customer.model_dump_json()
+        self.assertNotIn("Maya Chen", text)
+        self.assertNotIn("Riley Cho", text)
+        self.assertNotIn("Avery Quinn", text)
+        support = inbox.get("RTC-1042", SUPPORT)
+        assert support is not None
+        self.assertEqual(support.confirmed_by, "Riley Cho")
+        self.assertEqual(support.withdrawn_by, "Avery Quinn")
+        self.assertIsNone(support.handoff)
+
+    def test_a_withdrawn_handoff_can_be_confirmed_again(self):
+        inbox = Inbox.open(SAMPLES)
+        inbox.confirm_handoff("RTC-1042", "Maya Chen", person=SUPPORT)
+        withdrawn = inbox.withdraw_handoff("RTC-1042", person=SUPPORT)
+
+        again = inbox.confirm_handoff("RTC-1042", "Jordan Lee", person=SupportPerson(name="Avery Quinn"))
+
+        self.assertEqual(again.handoff.owner, "Jordan Lee")
+        self.assertEqual(again.confirmed_by, "Avery Quinn")
+        self.assertIsNone(again.withdrawn_by)
+        self.assertEqual(again.replies, withdrawn.replies)
+
+    def test_a_support_person_cannot_be_the_solutions_engineer(self):
+        inbox = Inbox.open(SAMPLES, support_names=("Maya Chen",))
+
+        with self.assertRaises(SolutionEngineerRejected):
+            inbox.confirm_handoff("RTC-1042", "Maya Chen", person=SUPPORT)
+
+        untouched = inbox.get("RTC-1042", SUPPORT)
+        assert untouched is not None
+        self.assertIsNone(untouched.handoff)
+        self.assertIsNone(untouched.confirmed_by)
+        with self.assertRaises(SolutionEngineerRejected):
+            inbox.confirm_handoff("RTC-1042", "Jordan Lee", person=SupportPerson(name="Jordan Lee"))
+        self.assertIsNone(inbox.get("RTC-1042", SUPPORT).handoff)
+
+    def test_handing_back_records_who_and_leaves_takeover_unnamed(self):
+        inbox = Inbox.open(SAMPLES)
+        before = inbox.get("RTC-1042", SUPPORT)
+        assert before is not None
+        self.assertIs(before.taken_over, False)
+        with self.assertRaises(NotAuthenticated):
+            inbox.hand_back("RTC-1042")
+        with self.assertRaises(HandbackRejected):
+            inbox.hand_back("RTC-1042", person=SUPPORT)
+
+        spoken = inbox.reply("RTC-1042", "I'll check the recording failure.", person=SUPPORT)
+        again = inbox.reply("RTC-1042", "The second note is from someone else.", person=SupportPerson(name="Avery Quinn"))
+
+        self.assertIs(spoken.taken_over, True)
+        self.assertIs(again.taken_over, True)
+        self.assertIsNone(again.handed_back_by)
+        self.assertEqual([reply.author for reply in again.replies], ["Riley Cho", "Avery Quinn"])
+
+        handed = inbox.hand_back("RTC-1042", person=SUPPORT)
+        self.assertIs(handed.taken_over, False)
+        self.assertEqual(handed.handed_back_by, "Riley Cho")
+        self.assertEqual(handed.replies, again.replies)
+        customer = inbox.open_customer("RTC-1042", before.credential)
+        self.assertEqual([reply.author for reply in customer.replies], ["Riley Cho", "Avery Quinn"])
+        seen = customer.model_dump()
+        self.assertNotIn("taken_over", seen)
+        self.assertNotIn("handed_back_by", seen)
+        self.assertNotIn("confirmed_by", seen)
+        support = inbox.get("RTC-1042", SUPPORT)
+        assert support is not None
+        self.assertEqual(support.handed_back_by, "Riley Cho")
+        self.assertIs(support.taken_over, False)
+
+
+class SystemReplySignatureTest(IsolatedAsyncioTestCase):
+    async def test_a_system_reply_is_unsigned_and_does_not_name_takeover(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                return _Draft(
+                    title="Cloud recording",
+                    kind="support",
+                    summary="The opened page says where cloud recording can be stored.",
+                    support_steps=[],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                return DocumentationPage(
+                    url="https://trtc.io/document/45169",
+                    quote="Cloud recording can be stored in COS or VOD.",
+                )
+
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer(), documents=Documents())
+        body = "Do you support cloud recording?"
+        ticket = await inbox.submit(Letter(customer="Cedarline Media", body=body))
+
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in ticket.replies],
+            [(None, "Cloud recording can be stored in COS or VOD.\nhttps://trtc.io/document/45169")],
+        )
+        self.assertIs(ticket.taken_over, False)
+        self.assertIsNone(ticket.handed_back_by)
+        self.assertNotIn("Riley Cho", ticket.model_dump_json())
+        customer = inbox.open_customer(ticket.id, ticket.credential)
+        self.assertEqual([reply.author for reply in customer.replies], [None])
+        self.assertNotIn("taken_over", customer.model_dump())
+        self.assertNotIn("Riley Cho", customer.model_dump_json())
+
+        spoken = inbox.reply(ticket.id, "I'll stay with you on this.", person=SUPPORT)
+        self.assertIs(spoken.taken_over, True)
+        self.assertEqual([reply.author for reply in spoken.replies], [None, "Riley Cho"])
+        self.assertIsNone(spoken.handed_back_by)
 
 
 class LateQuotedReplyTest(IsolatedAsyncioTestCase):

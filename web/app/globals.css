@@ -227,9 +227,22 @@ h1, h2, h3, h4 { font-weight: 500; }
 .action:active:not(:disabled) { background: var(--navy); transform: scale(0.98); }
 .action:disabled { background: #dde4ef; color: #526078; }
 .error-note { grid-column: 1 / -1; color: #8d2c2c; font-size: 13px; }
-.handoff-result { display: flex; gap: 8px; align-items: flex-start; color: var(--teal); font-size: 13px; }
+.handoff-result { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; color: var(--teal); font-size: 13px; }
 .handoff-result svg { margin-top: 2px; }
 .handoff-result p { color: var(--muted); margin-top: 2px; }
+.handoff-result .action { margin-left: auto; }
+.takeover-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.takeover-note .error-note { flex-basis: 100%; }
 .badge.pending { background: var(--amber-wash); color: var(--amber); }
 .pending-note {
   display: grid;
