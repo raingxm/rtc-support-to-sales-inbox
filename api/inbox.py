@@ -60,6 +60,10 @@ class SolutionEngineerRejected(Exception):
     pass
 
 
+class ReplyContextChanged(Exception):
+    pass
+
+
 class HandbackRejected(Exception):
     pass
 
@@ -184,6 +188,8 @@ class TicketContent(BaseModel):
     credential: str = ""
     replies: tuple[Reply, ...] = ()
     pending_reason: PendingReason | None = None
+    reply_draft: str | None = None
+    reply_revision: int = 0
     taken_over: bool = False
     handed_back_by: str | None = None
 
@@ -232,7 +238,71 @@ class Ticket(TicketContent):
     def hand_back(self, handed_back_by: str) -> "Ticket":
         if not self.taken_over:
             raise HandbackRejected
-        return self.model_copy(update={"taken_over": False, "handed_back_by": handed_back_by})
+        return self.model_copy(update={
+            "taken_over": False,
+            "handed_back_by": handed_back_by,
+            "pending_reason": None,
+            "reply_draft": None,
+            "reply_revision": self.reply_revision + 1,
+        })
+
+    def with_customer_message(self, message: CustomerMessage) -> "Ticket":
+        return self.model_copy(update={
+            "messages": (*self.messages, message),
+            "reply_draft": None,
+            "reply_revision": self.reply_revision + 1,
+        })
+
+    def without_rejected_message(self, saved: "Ticket", prior_draft: str | None) -> "Ticket":
+        if self.messages != saved.messages:
+            return self
+        update: dict[str, object] = {
+            "messages": self.messages[:-1],
+            "reply_revision": self.reply_revision + 1,
+        }
+        if self.reply_revision == saved.reply_revision:
+            update["reply_draft"] = prior_draft
+        return self.model_copy(update=update)
+
+    def with_support_reply(self, reply: Reply, expected_revision: int | None) -> "Ticket":
+        if expected_revision is not None and expected_revision != self.reply_revision:
+            raise ReplyContextChanged
+        return self.model_copy(update={
+            "replies": (*self.replies, reply),
+            "pending_reason": None,
+            "taken_over": True,
+            "reply_draft": None,
+            "reply_revision": self.reply_revision + 1,
+        })
+
+    def with_analysis(
+        self,
+        started: "Ticket",
+        triage: Triage,
+        title: str,
+        reply: Reply | None,
+        pending_reason: PendingReason | None,
+        *,
+        late: bool,
+    ) -> "Ticket":
+        if self.messages != started.messages:
+            return self
+        update: dict[str, object] = {}
+        if self.handoff is None:
+            update.update(triage=triage, title=title)
+        if not started.taken_over:
+            if not self.taken_over and self.reply_revision == started.reply_revision:
+                if reply is not None:
+                    update.update(replies=(*self.replies, reply), reply_revision=self.reply_revision + 1)
+                    update["pending_reason"] = pending_reason
+                elif not late and self.handoff is None:
+                    update["pending_reason"] = None
+            elif late and reply is not None and self.taken_over and (
+                self.reply_revision == started.reply_revision + 1
+            ):
+                # The first support reply was the only change since analysis began.
+                update["reply_draft"] = reply.body
+        return self.model_copy(update=update) if update else self
 
 
 class _SampleTriage(_TriageText):
@@ -371,25 +441,24 @@ class TicketStore(Protocol):
     def list_tickets(self) -> list[Ticket]: ...
     def get(self, ticket_id: str) -> Ticket | None: ...
     def append(self, content: TicketContent) -> Ticket: ...
-    def append_message(self, ticket_id: str, message: CustomerMessage) -> Ticket: ...
-    def drop_last_message(self, ticket_id: str, message_count: int) -> Ticket: ...
+    def append_message(self, ticket_id: str, message: CustomerMessage) -> tuple[Ticket, str | None]: ...
+    def drop_last_message(self, saved: Ticket, prior_draft: str | None) -> Ticket: ...
     def confirm_handoff(self, ticket_id: str, owner: Owner, confirmed_by: str) -> Ticket: ...
     def withdraw_handoff(self, ticket_id: str, withdrawn_by: str) -> Ticket: ...
     def hand_back(self, ticket_id: str, handed_back_by: str) -> Ticket: ...
     def delete(self, ticket_id: str) -> None: ...
-    def apply_analysis(self, ticket_id: str, triage: Triage, title: str, message_count: int) -> Ticket: ...
-    def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket: ...
+    def mark_stopped_waiting(self, started: Ticket) -> Ticket: ...
     def land_analysis(
         self,
-        ticket_id: str,
-        message_count: int,
-        reply_count: int,
+        started: Ticket,
         triage: Triage,
         title: str,
         reply: Reply | None,
         pending_reason: PendingReason | None,
+        *,
+        late: bool,
     ) -> Ticket: ...
-    def add_reply(self, ticket_id: str, reply: Reply) -> Ticket: ...
+    def add_reply(self, ticket_id: str, reply: Reply, expected_revision: int | None) -> Ticket: ...
 
 
 class _MemoryTicketStore:
@@ -417,24 +486,23 @@ class _MemoryTicketStore:
             self._tickets[ticket.id] = ticket
             return ticket
 
-    def append_message(self, ticket_id: str, message: CustomerMessage) -> Ticket:
+    def append_message(self, ticket_id: str, message: CustomerMessage) -> tuple[Ticket, str | None]:
         with self._lock:
             latest = self._tickets.get(ticket_id)
             if latest is None:
                 raise TicketNotFound(ticket_id)
-            updated = latest.model_copy(update={"messages": (*latest.messages, message)})
+            updated = latest.with_customer_message(message)
             self._tickets[ticket_id] = updated
-            return updated
+            return updated, latest.reply_draft
 
-    def drop_last_message(self, ticket_id: str, message_count: int) -> Ticket:
+    def drop_last_message(self, saved: Ticket, prior_draft: str | None) -> Ticket:
         with self._lock:
-            latest = self._tickets.get(ticket_id)
+            latest = self._tickets.get(saved.id)
             if latest is None:
-                raise TicketNotFound(ticket_id)
-            if len(latest.messages) == message_count:
-                latest = latest.model_copy(update={"messages": latest.messages[:-1]})
-                self._tickets[ticket_id] = latest
-            return latest
+                raise TicketNotFound(saved.id)
+            updated = latest.without_rejected_message(saved, prior_draft)
+            self._tickets[updated.id] = updated
+            return updated
 
     def confirm_handoff(self, ticket_id: str, owner: Owner, confirmed_by: str) -> Ticket:
         with self._lock:
@@ -458,66 +526,40 @@ class _MemoryTicketStore:
         with self._lock:
             self._tickets.pop(ticket_id, None)
 
-    def apply_analysis(self, ticket_id: str, triage: Triage, title: str, message_count: int) -> Ticket:
+    def mark_stopped_waiting(self, started: Ticket) -> Ticket:
         with self._lock:
-            latest = self._tickets.get(ticket_id)
+            latest = self._tickets.get(started.id)
             if latest is None:
-                raise TicketNotFound(ticket_id)
-            if latest.handoff is None and len(latest.messages) == message_count:
-                latest = latest.model_copy(update={"triage": triage, "title": title, "pending_reason": None})
-                self._tickets[ticket_id] = latest
-            return latest
-
-    def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
-        with self._lock:
-            latest = self._tickets.get(ticket_id)
-            if latest is None:
-                raise TicketNotFound(ticket_id)
-            if len(latest.messages) == message_count and len(latest.replies) == reply_count:
+                raise TicketNotFound(started.id)
+            if latest.reply_revision == started.reply_revision:
                 latest = latest.model_copy(update={"pending_reason": STOPPED_WAITING})
-                self._tickets[ticket_id] = latest
+                self._tickets[latest.id] = latest
             return latest
 
     def land_analysis(
         self,
-        ticket_id: str,
-        message_count: int,
-        reply_count: int,
+        started: Ticket,
         triage: Triage,
         title: str,
         reply: Reply | None,
         pending_reason: PendingReason | None,
+        *,
+        late: bool,
     ) -> Ticket:
         with self._lock:
-            latest = self._tickets.get(ticket_id)
+            latest = self._tickets.get(started.id)
             if latest is None:
-                raise TicketNotFound(ticket_id)
-            if len(latest.messages) != message_count:
-                return latest
-            spoken = any(reply.author for reply in latest.replies)
-            update: dict[str, object] = {}
-            if latest.handoff is None and not spoken:
-                update["triage"] = triage
-                update["title"] = title
-            if reply is not None and not spoken and len(latest.replies) == reply_count:
-                update["replies"] = (*latest.replies, reply)
-                update["pending_reason"] = pending_reason
-            if not update:
-                return latest
-            updated = latest.model_copy(update=update)
-            self._tickets[ticket_id] = updated
+                raise TicketNotFound(started.id)
+            updated = latest.with_analysis(started, triage, title, reply, pending_reason, late=late)
+            self._tickets[updated.id] = updated
             return updated
 
-    def add_reply(self, ticket_id: str, reply: Reply) -> Ticket:
+    def add_reply(self, ticket_id: str, reply: Reply, expected_revision: int | None) -> Ticket:
         with self._lock:
             latest = self._tickets.get(ticket_id)
             if latest is None:
                 raise TicketNotFound(ticket_id)
-            updated = latest.model_copy(update={
-                "replies": (*latest.replies, reply),
-                "pending_reason": None,
-                "taken_over": True,
-            })
+            updated = latest.with_support_reply(reply, expected_revision)
             self._tickets[ticket_id] = updated
             return updated
 
@@ -589,94 +631,54 @@ class Inbox:
             page = await self._documents.open(_transcript(messages))
         return _Settled(draft, triage, page)
 
-    async def _stop(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
-        stopped = await asyncio.to_thread(
-            self._store.mark_stopped_waiting, ticket_id, message_count, reply_count,
-        )
-        return self._present(stopped)
+    async def _stop(self, started: Ticket) -> Ticket:
+        return self._present(await asyncio.to_thread(self._store.mark_stopped_waiting, started))
 
-    def _documented_reply(
-        self,
-        messages: Sequence[CustomerMessage],
-        settled: _Settled,
-    ) -> tuple[Reply, PendingReason | None] | None:
-        if settled.page is None:
-            if self._documents is None:
-                return None
-            return Reply(body=_cannot_answer(messages)), DOCUMENTATION_UNOPENED
-        return _quoted_reply(settled.page), None
-
-    async def _publish_ready(
-        self,
-        ticket_id: str,
-        messages: Sequence[CustomerMessage],
-        reply_count: int,
-        settled: _Settled,
-    ) -> Ticket:
-        message_count = len(messages)
-        documented = self._documented_reply(messages, settled)
-        if documented is None:
-            return self._present(await asyncio.to_thread(
-                self._store.apply_analysis, ticket_id, settled.triage, settled.draft.title, message_count,
-            ))
-        reply, pending_reason = documented
+    async def _land_analysis(self, started: Ticket, settled: _Settled, *, late: bool) -> Ticket:
+        reply = None
+        pending_reason = None
+        if settled.page is not None:
+            reply = _quoted_reply(settled.page)
+        elif not late and self._documents is not None:
+            reply = Reply(body=_cannot_answer(started.messages))
+            pending_reason = DOCUMENTATION_UNOPENED
         return self._present(await asyncio.to_thread(
             self._store.land_analysis,
-            ticket_id,
-            message_count,
-            reply_count,
+            started,
             settled.triage,
             settled.draft.title,
             reply,
             pending_reason,
+            late=late,
         ))
 
-    async def _land_late(
-        self,
-        attempt: asyncio.Task[_Settled],
-        ticket_id: str,
-        message_count: int,
-        reply_count: int,
-    ) -> None:
+    async def _land_late(self, attempt: asyncio.Task[_Settled], started: Ticket) -> None:
         try:
             settled = await attempt
         except (TimeoutError, AnalysisFailed, AnalysisUnavailable, QuoteRejected):
             return
-        reply = None if settled.page is None else _quoted_reply(settled.page)
-        await asyncio.to_thread(
-            self._store.land_analysis,
-            ticket_id,
-            message_count,
-            reply_count,
-            settled.triage,
-            settled.draft.title,
-            reply,
-            None,
-        )
+        await self._land_analysis(started, settled, late=True)
 
-    async def _resolve(self, ticket_id: str, messages: Sequence[CustomerMessage], reply_count: int) -> Ticket:
-        message_count = len(messages)
-        attempt = asyncio.create_task(self._attempt(messages))
+    async def _resolve(self, started: Ticket) -> Ticket:
+        attempt = asyncio.create_task(self._attempt(started.messages))
         try:
             settled = await asyncio.wait_for(asyncio.shield(attempt), self._wait_limit)
         except AnalysisFailed:
             attempt.exception()
-            return await self._stop(ticket_id, message_count, reply_count)
+            return await self._stop(started)
         except TimeoutError:
             if not attempt.done():
-                stopped = await self._stop(ticket_id, message_count, reply_count)
-                self._track(asyncio.create_task(
-                    self._land_late(attempt, ticket_id, message_count, reply_count),
-                ))
+                stopped = await self._stop(started)
+                self._track(asyncio.create_task(self._land_late(attempt, started)))
                 return stopped
             error = attempt.exception()
             if error is None:
                 settled = attempt.result()
             elif isinstance(error, (TimeoutError, AnalysisFailed)):
-                return await self._stop(ticket_id, message_count, reply_count)
+                return await self._stop(started)
             else:
                 raise error
-        return await self._publish_ready(ticket_id, messages, reply_count, settled)
+        return await self._land_analysis(started, settled, late=False)
 
     @classmethod
     def open(
@@ -734,7 +736,7 @@ class Inbox:
             credential=secrets.token_urlsafe(32),
         ))
         try:
-            return await self._resolve(ticket.id, messages, len(ticket.replies))
+            return await self._resolve(ticket)
         except QuoteRejected:
             await asyncio.to_thread(self._store.delete, ticket.id)
             raise
@@ -758,14 +760,13 @@ class Inbox:
             raise TicketNotFound(ticket_id)
         if current.handoff is None and self._analyzer is None:
             raise AnalysisUnavailable
-        prior_count = len(current.messages)
-        saved = await asyncio.to_thread(self._store.append_message, ticket_id, message)
-        if current.handoff is not None:
+        saved, prior_draft = await asyncio.to_thread(self._store.append_message, ticket_id, message)
+        if saved.handoff is not None and (self._analyzer is None or self._documents is None):
             return self._present(saved)
         try:
-            return await self._resolve(ticket_id, saved.messages, len(saved.replies))
+            return await self._resolve(saved)
         except QuoteRejected:
-            await asyncio.to_thread(self._store.drop_last_message, ticket_id, prior_count + 1)
+            await asyncio.to_thread(self._store.drop_last_message, saved, prior_draft)
             raise
 
     def use_support_names(self, names: Collection[str]) -> None:
@@ -785,9 +786,16 @@ class Inbox:
         person = _signed_in(person)
         return self._present(self._store.hand_back(ticket_id, person.name))
 
-    def reply(self, ticket_id: str, body: str, *, person: SupportPerson) -> Ticket:
-        reply = Reply(body=body, author=person.name)
-        return self._present(self._store.add_reply(ticket_id, reply))
+    def reply(
+        self,
+        ticket_id: str,
+        body: str,
+        *,
+        person: SupportPerson,
+        expected_revision: int | None = None,
+    ) -> Ticket:
+        reply = Reply(body=body, author=_signed_in(person).name)
+        return self._present(self._store.add_reply(ticket_id, reply, expected_revision))
 
 
 SAMPLES = (

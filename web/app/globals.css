@@ -260,7 +260,8 @@ h1, h2, h3, h4 { font-weight: 500; }
   gap: 4px;
 }
 .reply-form { margin-top: 16px; }
-.reply-form textarea { min-height: 5.5rem; resize: vertical; }
+.reply-form textarea { min-height: 5.5rem; max-height: 18rem; resize: none; field-sizing: content; }
+.reply-draft-note { color: var(--muted); font-size: 13px; }
 .sign-in { padding: 20px; background: var(--paper); border: 1px solid var(--border); border-radius: 12px; }
 .signed-in { color: var(--muted); font-size: 13px; }
 

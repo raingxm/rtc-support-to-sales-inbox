@@ -8,7 +8,7 @@ from typing import Annotated
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from api.inbox import (
     AnalysisFailed,
@@ -22,6 +22,7 @@ from api.inbox import (
     Letter,
     QuoteRejected,
     Reply,
+    ReplyContextChanged,
     SAMPLES,
     SolutionEngineerRejected,
     SupportPerson,
@@ -54,6 +55,7 @@ class MessageBody(BaseModel):
 
 class ReplyBody(BaseModel):
     body: str
+    expected_revision: int | None = Field(default=None, ge=0)
 
 
 class SignIn(BaseModel):
@@ -225,7 +227,11 @@ def create_app(
         active_inbox: InboxDependency,
     ) -> Ticket:
         try:
-            return active_inbox.reply(ticket_id, reply.body, person=person)
+            return active_inbox.reply(
+                ticket_id, reply.body, person=person, expected_revision=reply.expected_revision,
+            )
+        except ReplyContextChanged:
+            raise HTTPException(status_code=409, detail="The conversation changed. Write a new reply.") from None
         except TicketNotFound:
             raise HTTPException(status_code=404, detail="Ticket not found.") from None
         except ValidationError:
