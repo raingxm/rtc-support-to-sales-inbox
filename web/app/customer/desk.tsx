@@ -94,6 +94,21 @@ type TicketView =
   | { status: "error" }
   | { status: "ready"; ticket: CustomerRecord };
 
+const refreshDelayMs = 2000;
+
+function sameConversation(current: CustomerRecord, next: CustomerRecord) {
+  return current.title === next.title
+    && current.messages.length === next.messages.length
+    && current.replies.length === next.replies.length
+    && current.messages.every((message, index) => message.body === next.messages[index]?.body)
+    && current.replies.every((reply, index) =>
+      reply.body === next.replies[index]?.body && reply.author === next.replies[index]?.author);
+}
+
+function olderThan(current: CustomerRecord, next: CustomerRecord) {
+  return next.messages.length < current.messages.length || next.replies.length < current.replies.length;
+}
+
 export function CustomerTicket({ ticketId, credential }: { ticketId: string; credential: string }) {
   const [view, setView] = useState<TicketView>({ status: "loading" });
   const [body, setBody] = useState("");
@@ -115,6 +130,52 @@ export function CustomerTicket({ ticketId, credential }: { ticketId: string; cre
     );
     return () => controller.abort();
   }, [ticketId, credential, loadAttempt]);
+
+  useEffect(() => {
+    if (view.status !== "ready") return;
+    let stopped = false;
+    let timer = 0;
+
+    async function refresh() {
+      if (stopped || document.visibilityState === "hidden") return;
+      try {
+        const ticket = await fetchCustomerTicket(ticketId, credential, AbortSignal.timeout(8000));
+        if (stopped || !ticket) return;
+        setView((current) => {
+          if (current.status !== "ready" || olderThan(current.ticket, ticket) || sameConversation(current.ticket, ticket)) {
+            return current;
+          }
+          return { status: "ready", ticket };
+        });
+      } catch {
+        // A missed refresh leaves the conversation already on screen.
+      }
+    }
+
+    function schedule() {
+      timer = window.setTimeout(() => {
+        void refresh().finally(() => {
+          if (!stopped) schedule();
+        });
+      }, refreshDelayMs);
+    }
+
+    function onVisible() {
+      if (document.visibilityState !== "visible") return;
+      window.clearTimeout(timer);
+      void refresh().finally(() => {
+        if (!stopped) schedule();
+      });
+    }
+
+    schedule();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [ticketId, credential, view.status]);
 
   useEffect(() => {
     const thread = threadRef.current;

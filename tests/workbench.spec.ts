@@ -101,7 +101,7 @@ test("checks a new letter against the source before adding it to the queue", asy
   await page.screenshot({ path: testInfo.outputPath("live-letter.png"), fullPage: true });
 });
 
-test("customer and support show the same conversation", async ({ page }) => {
+test("customer and support show the same conversation", async ({ page, request }) => {
   const first = "We want to launch a pilot next month.";
   const second = "My join call returns an invalid token error.";
 
@@ -130,4 +130,14 @@ test("customer and support show the same conversation", async ({ page }) => {
   await expect(support.locator(".message p")).toHaveText([first, second]);
   const hasOverflow = await support.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   expect(hasOverflow).toBe(false);
+
+  const ticketId = new URL(page.url()).pathname.split("/")[2];
+  const reply = "Cloud recording is available for LiveKit rooms.";
+  const sent = await request.post("/api/tickets/" + ticketId + "/replies", {
+    headers: supportHeaders,
+    data: { body: reply },
+  });
+  expect(sent.ok()).toBeTruthy();
+  await expect(page.locator(".message.desk")).toContainText("Riley Cho");
+  await expect(page.locator(".message.desk p")).toHaveText(reply);
 });
