@@ -3,7 +3,9 @@ from typing import Sequence
 from psycopg import Connection, IsolationLevel, connect
 from psycopg.types.json import Json
 
-from api.inbox import CustomerMessage, Owner, Reply, Ticket, TicketContent, TicketNotFound, Triage
+from api.inbox import (
+    STOPPED_WAITING, CustomerMessage, Owner, Reply, Ticket, TicketContent, TicketNotFound, Triage,
+)
 
 
 _CREATE_TICKETS = """
@@ -158,7 +160,7 @@ class PostgresTicketStore:
             latest = _ticket(row)
             if len(latest.messages) != message_count or len(latest.replies) != reply_count:
                 return latest
-            return self._write(connection, latest.model_copy(update={"pending_reason": "已经停止等待"}))
+            return self._write(connection, latest.model_copy(update={"pending_reason": STOPPED_WAITING}))
 
     def add_reply(self, ticket_id: str, reply: Reply) -> Ticket:
         with self._connect() as connection:

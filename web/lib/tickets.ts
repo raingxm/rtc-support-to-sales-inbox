@@ -42,7 +42,7 @@ const ticketSchema = z.object({
   triage: triageSchema.nullable(),
   handoff: z.object({ owner: ownerSchema }).nullable(),
   pending: z.object({
-    reason: z.literal("已经停止等待"),
+    reason: z.literal("stopped-waiting"),
     waiting_seconds: z.int().nonnegative(),
   }).nullable(),
   replies: z.array(replySchema),
@@ -127,7 +127,7 @@ async function submittedTicket(response: Response, fallback: string) {
     const rejection = rejectedQuoteSchema.safeParse(await response.json());
     if (rejection.success) {
       throw new LetterSubmissionError(
-        `Analysis could not find this quote in the letter. “${rejection.data.quote}” Review the original message and try again.`,
+        `Analysis could not find this quote in the letter. "${rejection.data.quote}" Review the original message and try again.`,
       );
     }
     throw new LetterSubmissionError("The letter or its analysis could not be checked. Review the message and try again.");
@@ -219,7 +219,7 @@ async function customerTicket(response: Response, fallback: string) {
     const rejection = rejectedQuoteSchema.safeParse(await response.json());
     if (rejection.success) {
       throw new LetterSubmissionError(
-        `That message could not be checked. “${rejection.data.quote}” Try again.`,
+        `That message could not be checked. "${rejection.data.quote}" Try again.`,
       );
     }
     throw new LetterSubmissionError("Write a message and try again.");

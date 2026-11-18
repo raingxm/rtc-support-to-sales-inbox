@@ -415,7 +415,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
         self.assertEqual(support.replies, ())
         self.assertIsNotNone(support.pending)
         assert support.pending is not None
-        self.assertEqual(support.pending.reason, "已经停止等待")
+        self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 90)
 
     async def test_waiting_is_measured_from_the_latest_customer_message(self):
@@ -445,7 +445,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
         self.assertIsNotNone(support)
         assert support is not None and support.pending is not None
         self.assertEqual([message.body for message in support.messages], [first, follow_up])
-        self.assertEqual(support.pending.reason, "已经停止等待")
+        self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 90)
         customer = inbox.open_customer(opened.id, opened.credential)
         self.assertEqual([message.body for message in customer.messages], [first, follow_up])
@@ -471,7 +471,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
         self.assertIsNotNone(support)
         assert support is not None and support.pending is not None
         self.assertEqual(support.id, "RTC-1043")
-        self.assertEqual(support.pending.reason, "已经停止等待")
+        self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 30)
 
     async def test_a_support_reply_is_signed_on_the_customer_and_support_entrances(self):
@@ -560,7 +560,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(updated.pending)
         assert updated.pending is not None
-        self.assertEqual(updated.pending.reason, "已经停止等待")
+        self.assertEqual(updated.pending.reason, "stopped-waiting")
         self.assertEqual(
             [(reply.author, reply.body) for reply in updated.replies],
             [("Riley Cho", "I'll check the token expiry with you.")],

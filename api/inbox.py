@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Protocol, Sequence
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Owner = Literal["Maya Chen", "Jordan Lee"]
+STOPPED_WAITING = "stopped-waiting"
 QuoteFailure = Literal[
     "not-in-letter",
     "empty-quote",
@@ -128,7 +129,7 @@ class Pending(BaseModel):
     """Support-only waiting state. The customer entrance never receives this."""
 
     model_config = ConfigDict(frozen=True)
-    reason: Literal["已经停止等待"]
+    reason: Literal["stopped-waiting"]
     waiting_seconds: int = Field(ge=0)
 
 
@@ -151,7 +152,7 @@ class TicketContent(BaseModel):
     triage: Triage | None = None
     credential: str = ""
     replies: tuple[Reply, ...] = ()
-    pending_reason: Literal["已经停止等待"] | None = None
+    pending_reason: Literal["stopped-waiting"] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -382,7 +383,7 @@ class _MemoryTicketStore:
             if latest is None:
                 raise TicketNotFound(ticket_id)
             if len(latest.messages) == message_count and len(latest.replies) == reply_count:
-                latest = latest.model_copy(update={"pending_reason": "已经停止等待"})
+                latest = latest.model_copy(update={"pending_reason": STOPPED_WAITING})
                 self._tickets[ticket_id] = latest
             return latest
 

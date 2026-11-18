@@ -132,7 +132,7 @@ class PostgresInboxTest(IsolatedAsyncioTestCase):
         assert support is not None and support.pending is not None
         self.assertEqual(support.id, ticket.id)
         self.assertEqual([message.body for message in support.messages], [body])
-        self.assertEqual(support.pending.reason, "已经停止等待")
+        self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 120)
         customer = reopened.open_customer(ticket.id, ticket.credential)
         self.assertEqual([message.body for message in customer.messages], [body])

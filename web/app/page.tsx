@@ -17,6 +17,10 @@ const kindLabels = {
   clarify: "Needs context",
 };
 
+const pendingLabels = {
+  "stopped-waiting": "Stopped waiting",
+};
+
 type InboxState =
   | { status: "loading" }
   | { status: "signed-out" }
@@ -53,7 +57,7 @@ function TicketList({ tickets, selectedId, onSelect }: {
                 {ticket.handoff
                   ? "Handoff assigned"
                   : ticket.pending
-                    ? ticket.pending.reason
+                    ? pendingLabels[ticket.pending.reason]
                     : ticket.triage
                       ? kindLabels[ticket.triage.kind]
                       : "Open"}
@@ -118,14 +122,14 @@ function NewLetterForm({ onCreated }: { onCreated: (ticket: Ticket) => void }) {
           aria-invalid={customerInvalid} aria-describedby={customerInvalid ? "letter-customer-error" : undefined}
           onChange={(event) => setCustomer(event.target.value)}
         />
-        {customerInvalid && <p className="error-note" id="letter-customer-error">Enter the customer’s name.</p>}
+        {customerInvalid && <p className="error-note" id="letter-customer-error">Enter the customer's name.</p>}
         <label htmlFor="letter-message">Customer message</label>
         <textarea
           id="letter-message" ref={messageField} value={body} rows={5} required disabled={pending}
           aria-invalid={messageInvalid} aria-describedby={messageInvalid ? "letter-message-error" : undefined}
           onChange={(event) => setBody(event.target.value)}
         />
-        {messageInvalid && <p className="error-note" id="letter-message-error">Paste the customer’s original message.</p>}
+        {messageInvalid && <p className="error-note" id="letter-message-error">Paste the customer's original message.</p>}
         <button className="action" type="submit" disabled={pending}>
           <span>{pending ? "Analyzing…" : "Analyze letter"}</span>
           <ArrowRight size={16} />
@@ -311,8 +315,8 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
         </div>
         {ticket.pending && (
           <p className="pending-note">
-            <strong>{ticket.pending.reason}</strong>
-            <span>Waiting {formatWait(ticket.pending.waiting_seconds)} since the customer’s last message.</span>
+            <strong>{pendingLabels[ticket.pending.reason]}</strong>
+            <span>Waiting {formatWait(ticket.pending.waiting_seconds)} since the customer's last message.</span>
           </p>
         )}
         <ReplyForm ticket={ticket} onUpdated={onUpdated} />
