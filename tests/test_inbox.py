@@ -1,12 +1,16 @@
 import asyncio
 import json
+import os
 from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 from pydantic import ValidationError
 
 from api.inbox import Inbox, Letter, QuoteRejected, SAMPLES, Ticket, TicketNotFound, _Draft, quote_text
+from api.main import _configured_inbox, load_local_env
 from api.model_analyzer import configured_analyzer
 
 
@@ -350,3 +354,32 @@ class OpenAIResponseTest(IsolatedAsyncioTestCase):
                     quote_text(ticket.messages[0].body, ticket.triage.evidence[0]),
                     "We want a pilot next month.",
                 )
+
+
+class LocalEnvTest(TestCase):
+    def test_a_dotenv_file_fills_unset_names_and_keeps_exported_values(self):
+        with TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text("OPENAI_API_KEY=from-file\nOPENAI_MODEL=from-file\n", encoding="utf-8")
+            with patch.dict(os.environ, {"OPENAI_API_KEY": "from-shell"}, clear=True):
+                load_local_env(env_file)
+                self.assertEqual(os.environ["OPENAI_API_KEY"], "from-shell")
+                self.assertEqual(os.environ["OPENAI_MODEL"], "from-file")
+
+    def test_a_missing_dotenv_file_leaves_the_environment_unchanged(self):
+        with TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {}, clear=True):
+                load_local_env(Path(directory) / "missing.env")
+                self.assertNotIn("OPENAI_API_KEY", os.environ)
+
+    def test_startup_reads_the_dotenv_file_before_opening_the_inbox(self):
+        with TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text("OPENAI_MODEL=from-file\n", encoding="utf-8")
+            with (
+                patch("api.main._ENV_FILE", env_file),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                inbox = _configured_inbox()
+                self.assertEqual(os.environ["OPENAI_MODEL"], "from-file")
+                self.assertEqual(len(inbox.list_tickets()), 3)

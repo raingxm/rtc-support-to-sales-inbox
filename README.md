@@ -26,6 +26,8 @@ npm.cmd run dev
 
 Open [the workbench](http://127.0.0.1:3000). On macOS or Linux, use `.venv/bin/python` and `npm` in place of the PowerShell commands.
 
+FastAPI reads `.env` from the repository root when it starts. A value already set in the shell takes precedence. Restart FastAPI after changing `.env`.
+
 ## Walk through the three tickets
 
 1. Open **RTC-1042**. Check the original recording report and the evidence for a migration pilot. Select a solutions engineer and confirm the handoff. The support ticket remains open.
@@ -36,9 +38,9 @@ FastAPI serves three fictional tickets with prepared triage results. You can rev
 
 ## Analyze a new letter
 
-Set `OPENAI_API_KEY` in the terminal that runs FastAPI, then restart the API. Set `OPENAI_MODEL` to override the default model, `gpt-5.4-mini`.
+Put `OPENAI_API_KEY` in `.env`. Set `OPENAI_MODEL` to override the default model, `gpt-5.4-mini`.
 
-To use Quanzil, set `OPENAI_BASE_URL=https://quanzil.com/v1` and use a Quanzil key and a model that supports Responses API structured output. The base URL defaults to `https://api.openai.com/v1`. If you keep these settings in `.env`, load the file into the backend terminal before starting FastAPI.
+To use Quanzil, set `OPENAI_BASE_URL=https://quanzil.com/v1` and use a Quanzil key and a model that supports Responses API structured output. The base URL defaults to `https://api.openai.com/v1`.
 
 1. Open **New letter**. Enter the customer name and paste a fictional customer message.
 2. Click **Analyze letter**. The workbench selects the new ticket and shows its triage under **Live analysis**.
@@ -48,7 +50,7 @@ The API sends the message body to the configured model provider for analysis. It
 
 ## Persist tickets and handoffs
 
-Use a PostgreSQL database for the workbench. Set `DATABASE_URL` in the terminal that runs FastAPI. For example, a local development database named `rtc_inbox` with a dedicated user could use this configuration.
+Use a PostgreSQL database for the workbench. Put `DATABASE_URL` in `.env`. For example, a local development database named `rtc_inbox` with a dedicated user could use this configuration.
 
 ```dotenv
 DATABASE_URL=postgresql://rtc_inbox:local_password@127.0.0.1:5432/rtc_inbox

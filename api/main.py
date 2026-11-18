@@ -1,8 +1,10 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
@@ -22,8 +24,15 @@ from api.inbox import (
 from api.model_analyzer import configured_analyzer
 from api.postgres import PostgresTicketStore
 
+_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
+
+def load_local_env(path: Path | None = None) -> None:
+    load_dotenv(_ENV_FILE if path is None else path, override=False)
+
 
 def _configured_inbox() -> Inbox:
+    load_local_env()
     database_url = os.getenv("DATABASE_URL", "").strip()
     store = PostgresTicketStore(database_url) if database_url else None
     return Inbox.open(SAMPLES, analyzer=configured_analyzer(), store=store)
