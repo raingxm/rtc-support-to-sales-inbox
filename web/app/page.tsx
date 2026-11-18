@@ -7,7 +7,7 @@ import {
 import { type FormEvent, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { DeskFrame } from "./frame";
 import {
-  createHandoff, handBack, LetterSubmissionError, listTickets, owners, sendReply, signIn, submitLetter,
+  createHandoff, handBack as requestHandBack, LetterSubmissionError, listTickets, owners, sendReply, signIn, submitLetter,
   withdrawHandoff,
   supportName, supportToken, SupportSignInRequired, type EvidenceSpan, type Owner, type Ticket,
 } from "../lib/tickets";
@@ -285,11 +285,11 @@ function Takeover({ ticket, onUpdated }: {
   const pending = submission === "pending";
   if (!ticket.taken_over && !ticket.handed_back_by) return null;
 
-  async function giveBack() {
+  async function handBack() {
     if (pending) return;
     setSubmission("pending");
     try {
-      onUpdated(await handBack(ticket.id));
+      onUpdated(await requestHandBack(ticket.id));
       setSubmission("idle");
     } catch {
       setSubmission("error");
@@ -302,7 +302,7 @@ function Takeover({ ticket, onUpdated }: {
         ? <strong>With support</strong>
         : <strong>Handed back by {ticket.handed_back_by}</strong>}
       {ticket.taken_over && (
-        <button className="action" type="button" onClick={giveBack} disabled={pending}>
+        <button className="action" type="button" onClick={handBack} disabled={pending}>
           {pending ? "Handing back…" : "Hand back"}
         </button>
       )}

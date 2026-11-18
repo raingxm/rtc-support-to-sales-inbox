@@ -38,14 +38,14 @@ _TicketRow = tuple[str, int | None, dict[str, object], str | None, str | None, s
 
 def _ticket(row: _TicketRow) -> Ticket:
     ticket_id, sample_order, content, owner, confirmed_by, withdrawn_by = row
-    standing = owner is not None
+    engineer_assigned = owner is not None
     return Ticket.model_validate({
         **content,
         "id": ticket_id,
         "origin": "sample" if sample_order is not None else "live",
-        "handoff": {"owner": owner} if standing else None,
+        "handoff": {"owner": owner} if engineer_assigned else None,
         "confirmed_by": confirmed_by,
-        "withdrawn_by": None if standing else withdrawn_by,
+        "withdrawn_by": None if engineer_assigned else withdrawn_by,
     })
 
 
