@@ -3,7 +3,7 @@ from typing import Sequence
 from psycopg import Connection, IsolationLevel, connect
 from psycopg.types.json import Json
 
-from api.inbox import CustomerMessage, Owner, Ticket, TicketContent, TicketNotFound, Triage
+from api.inbox import CustomerMessage, Owner, Reply, Ticket, TicketContent, TicketNotFound, Triage
 
 
 _CREATE_TICKETS = """
@@ -90,9 +90,16 @@ class PostgresTicketStore:
             assert row is not None
             return _ticket(row)
 
-    def append_message(
-        self, ticket_id: str, message: CustomerMessage, triage: Triage | None, prior_count: int,
-    ) -> Ticket:
+    def _write(self, connection: Connection, ticket: Ticket) -> Ticket:
+        connection.execute(
+            "UPDATE rtc_tickets SET content = %s WHERE id = %s",
+            (Json(ticket.model_dump(mode="json", include=set(TicketContent.model_fields))), ticket.id),
+        )
+        stored = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket.id,)).fetchone()
+        assert stored is not None
+        return _ticket(stored)
+
+    def append_message(self, ticket_id: str, message: CustomerMessage) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
                 _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
@@ -101,11 +108,37 @@ class PostgresTicketStore:
             if row is None:
                 raise TicketNotFound(ticket_id)
             latest = _ticket(row)
-            use_new_triage = latest.handoff is None and triage is not None and len(latest.messages) == prior_count
-            updated = latest.model_copy(update={
-                "messages": (*latest.messages, message),
-                "triage": triage if use_new_triage else latest.triage,
-            })
+            return self._write(connection, latest.model_copy(update={"messages": (*latest.messages, message)}))
+
+    def drop_last_message(self, ticket_id: str, message_count: int) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            if len(latest.messages) != message_count:
+                return latest
+            return self._write(connection, latest.model_copy(update={"messages": latest.messages[:-1]}))
+
+    def delete(self, ticket_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM rtc_tickets WHERE id = %s", (ticket_id,))
+
+    def apply_analysis(self, ticket_id: str, triage: Triage, title: str, message_count: int) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            if latest.handoff is not None or len(latest.messages) != message_count:
+                return latest
+            updated = latest.model_copy(update={"triage": triage, "title": title, "pending_reason": None})
             connection.execute(
                 "UPDATE rtc_tickets SET content = %s WHERE id = %s",
                 (Json(updated.model_dump(mode="json", include=set(TicketContent.model_fields))), ticket_id),
@@ -113,6 +146,33 @@ class PostgresTicketStore:
             stored = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
         assert stored is not None
         return _ticket(stored)
+
+    def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            if len(latest.messages) != message_count or len(latest.replies) != reply_count:
+                return latest
+            return self._write(connection, latest.model_copy(update={"pending_reason": "已经停止等待"}))
+
+    def add_reply(self, ticket_id: str, reply: Reply) -> Ticket:
+        with self._connect() as connection:
+            row = connection.execute(
+                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
+                (ticket_id,),
+            ).fetchone()
+            if row is None:
+                raise TicketNotFound(ticket_id)
+            latest = _ticket(row)
+            return self._write(connection, latest.model_copy(update={
+                "replies": (*latest.replies, reply),
+                "pending_reason": None,
+            }))
 
     def confirm_handoff(self, ticket_id: str, owner: Owner) -> Ticket:
         with self._connect() as connection:

@@ -86,8 +86,8 @@ h1, h2, h3, h4, p, blockquote { margin: 0; }
 }
 .customer-form { display: grid; justify-items: start; gap: 6px; }
 :is(.letter-form, .customer-form) label { font-size: 12px; font-weight: 700; }
-:is(.letter-form, .customer-form) input,
-:is(.letter-form, .customer-form) textarea {
+:is(.letter-form, .customer-form, .reply-form, .sign-in) input,
+:is(.letter-form, .customer-form, .reply-form, .sign-in) textarea {
   width: 100%;
   max-width: 68ch;
   min-height: 38px;
@@ -192,7 +192,26 @@ h1, h2, h3, h4, p, blockquote { margin: 0; }
 .handoff-result { display: flex; gap: 8px; align-items: flex-start; color: var(--teal); font-size: 13px; }
 .handoff-result svg { margin-top: 2px; }
 .handoff-result p { color: var(--muted); margin-top: 2px; }
-.notice { display: grid; justify-items: start; gap: 7px; padding: 22px; }
+.badge.pending { background: var(--amber-wash); color: var(--amber); }
+.pending-note {
+  display: grid;
+  gap: 2px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: var(--amber-wash);
+  color: var(--amber);
+  border-radius: 8px;
+}
+.pending-note span { color: var(--ink); font-size: 13px; }
+.reply-form, .sign-in {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+.reply-form { margin-top: 14px; }
+.reply-form textarea { min-height: 5.5rem; resize: vertical; }
+.sign-in { padding: 16px; background: var(--paper); border: 1px solid var(--border); border-radius: 12px; }
+.signed-in { color: var(--muted); font-size: 13px; }
 
 @media (max-width: 900px) {
   .workspace-grid { grid-template-columns: minmax(185px, 220px) minmax(0, 1fr); }

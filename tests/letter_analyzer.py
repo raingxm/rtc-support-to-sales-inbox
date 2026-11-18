@@ -1,4 +1,4 @@
-from api.inbox import Inbox, SAMPLES, _Draft
+from api.inbox import Inbox, SAMPLES, SupportPerson, _Draft
 from api.main import create_app
 
 
@@ -14,4 +14,7 @@ class FixedAnalyzer:
         )
 
 
-app = create_app(Inbox.open(SAMPLES, analyzer=FixedAnalyzer()))
+app = create_app(
+    Inbox.open(SAMPLES, analyzer=FixedAnalyzer()),
+    staff={"playwright-support-token": SupportPerson(name="Riley Cho")},
+)

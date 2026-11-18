@@ -7,8 +7,8 @@ import {
 import { type FormEvent, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { DeskFrame } from "./frame";
 import {
-  createHandoff, LetterSubmissionError, listTickets, owners, submitLetter,
-  type EvidenceSpan, type Owner, type Ticket,
+  createHandoff, LetterSubmissionError, listTickets, owners, sendReply, signIn, submitLetter,
+  supportName, supportToken, SupportSignInRequired, type EvidenceSpan, type Owner, type Ticket,
 } from "../lib/tickets";
 
 const kindLabels = {
@@ -19,8 +19,9 @@ const kindLabels = {
 
 type InboxState =
   | { status: "loading" }
+  | { status: "signed-out" }
   | { status: "error" }
-  | { status: "ready"; tickets: Ticket[] };
+  | { status: "ready"; tickets: Ticket[]; name: string };
 
 function TicketList({ tickets, selectedId, onSelect }: {
   tickets: Ticket[];
@@ -48,8 +49,14 @@ function TicketList({ tickets, selectedId, onSelect }: {
               </span>
               <strong>{ticket.title}</strong>
               <span className="queue-customer">{ticket.customer}</span>
-              <span className={"badge " + ticket.triage.kind}>
-                {ticket.handoff ? "Handoff assigned" : kindLabels[ticket.triage.kind]}
+              <span className={"badge " + (ticket.pending ? "pending" : ticket.triage?.kind ?? "")}>
+                {ticket.handoff
+                  ? "Handoff assigned"
+                  : ticket.pending
+                    ? ticket.pending.reason
+                    : ticket.triage
+                      ? kindLabels[ticket.triage.kind]
+                      : "Open"}
               </span>
             </button>
           </li>
@@ -215,14 +222,63 @@ function highlightMessage(characters: string[], evidence: EvidenceSpan[]) {
   return segments;
 }
 
+function formatWait(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes <= 0) return `${rest}s`;
+  return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
+}
+
+function ReplyForm({ ticket, onUpdated }: {
+  ticket: Ticket;
+  onUpdated: (ticket: Ticket) => void;
+}) {
+  const [body, setBody] = useState("");
+  const [submission, setSubmission] = useState<"idle" | "pending" | "error">("idle");
+  const pending = submission === "pending";
+
+  async function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending || !body.trim()) return;
+    setSubmission("pending");
+    try {
+      onUpdated(await sendReply(ticket.id, body));
+      setBody("");
+      setSubmission("idle");
+    } catch {
+      setSubmission("error");
+    }
+  }
+
+  return (
+    <form className="reply-form" onSubmit={send}>
+      <label htmlFor={"reply-" + ticket.id}>Reply to the customer</label>
+      <textarea
+        id={"reply-" + ticket.id}
+        value={body}
+        rows={3}
+        disabled={pending}
+        onChange={(event) => setBody(event.target.value)}
+      />
+      <button className="action" type="submit" disabled={pending || !body.trim()}>
+        <span>{pending ? "Sending…" : "Send reply"}</span>
+        <ArrowRight size={16} />
+      </button>
+      {submission === "error" && (
+        <p className="error-note" role="alert">Could not send that reply. Try again.</p>
+      )}
+    </form>
+  );
+}
+
 function TicketDetail({ ticket, onUpdated, headingRef }: {
   ticket: Ticket;
   onUpdated: (ticket: Ticket) => void;
   headingRef: Ref<HTMLHeadingElement>;
 }) {
-  const { triage } = ticket;
-  const isMixed = triage.kind === "mixed";
-  const isClarify = triage.kind === "clarify";
+  const triage = ticket.triage;
+  const isMixed = triage?.kind === "mixed";
+  const isClarify = triage?.kind === "clarify";
 
   return (
     <article className="detail" aria-labelledby="ticket-heading">
@@ -236,20 +292,33 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
         <h2 id="ticket-heading" ref={headingRef} tabIndex={-1}>{ticket.title}</h2>
         <div className="conversation">
           {ticket.messages.map((message, index) => {
-            const evidence = isMixed ? triage.evidence.filter((span) => span.message === index) : [];
+            const evidence = triage?.kind === "mixed" ? triage.evidence.filter((span) => span.message === index) : [];
             return (
               <div className="message" key={index}>
                 <h3 className="eyebrow" id={index === 0 ? "message-heading" : undefined}>
                   {ticket.messages.length === 1 ? "Customer message" : `Customer message ${index + 1}`}
                 </h3>
-                <p>{evidence.length > 0 ? highlightMessage(Array.from(message.body), evidence) : message.body}</p>
+                <p>{triage && evidence.length > 0 ? highlightMessage(Array.from(message.body), evidence) : message.body}</p>
               </div>
             );
-          })}
+            })}
+          {ticket.replies.map((reply, index) => (
+            <div className="message" key={"reply-" + index}>
+              <h3 className="eyebrow">{reply.author ?? "Relay Desk"}</h3>
+              <p>{reply.body}</p>
+            </div>
+          ))}
         </div>
+        {ticket.pending && (
+          <p className="pending-note">
+            <strong>{ticket.pending.reason}</strong>
+            <span>Waiting {formatWait(ticket.pending.waiting_seconds)} since the customer’s last message.</span>
+          </p>
+        )}
+        <ReplyForm ticket={ticket} onUpdated={onUpdated} />
       </section>
 
-      <section className="triage" aria-labelledby="triage-heading">
+      {triage && <section className="triage" aria-labelledby="triage-heading">
         <div className="triage-heading">
           <h3 id="triage-heading"><ScanLine size={17} /> Triage review</h3>
           <span className="mono">{ticket.origin === "live" ? "Live analysis" : "Sample assessment"}</span>
@@ -300,8 +369,47 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
             </section>
           )}
         </div>
-      </section>
+      </section>}
     </article>
+  );
+}
+
+function SignInForm({ onSignedIn }: { onSignedIn: () => void }) {
+  const [token, setToken] = useState("");
+  const [submission, setSubmission] = useState<"idle" | "pending" | "error">("idle");
+  const pending = submission === "pending";
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending || !token.trim()) return;
+    setSubmission("pending");
+    try {
+      await signIn(token.trim());
+      onSignedIn();
+    } catch {
+      setSubmission("error");
+    }
+  }
+
+  return (
+    <form className="sign-in" onSubmit={submit}>
+      <label htmlFor="support-token">Access token</label>
+      <input
+        id="support-token"
+        type="password"
+        autoComplete="current-password"
+        value={token}
+        disabled={pending}
+        onChange={(event) => setToken(event.target.value)}
+      />
+      <button className="action" type="submit" disabled={pending || !token.trim()}>
+        <span>{pending ? "Signing in…" : "Sign in"}</span>
+        <ArrowRight size={16} />
+      </button>
+      {submission === "error" && (
+        <p className="error-note" role="alert">That access token was not recognized.</p>
+      )}
+    </form>
   );
 }
 
@@ -313,12 +421,17 @@ export default function InboxPage() {
   const addedTicket = useRef<string>(undefined);
 
   useEffect(() => {
+    if (!supportToken()) {
+      setInbox({ status: "signed-out" });
+      return;
+    }
     const controller = new AbortController();
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]);
     listTickets(signal).then(
-      (tickets) => setInbox({ status: "ready", tickets }),
-      () => {
-        if (!controller.signal.aborted) setInbox({ status: "error" });
+      (tickets) => setInbox({ status: "ready", tickets, name: supportName() }),
+      (error) => {
+        if (controller.signal.aborted) return;
+        setInbox(error instanceof SupportSignInRequired ? { status: "signed-out" } : { status: "error" });
       },
     );
     return () => controller.abort();
@@ -326,14 +439,14 @@ export default function InboxPage() {
 
   function updateTicket(updated: Ticket) {
     setInbox((current) => current.status === "ready"
-      ? { status: "ready", tickets: current.tickets.map((ticket) => ticket.id === updated.id ? updated : ticket) }
+      ? { ...current, tickets: current.tickets.map((ticket) => ticket.id === updated.id ? updated : ticket) }
       : current,
     );
   }
 
   function addTicket(ticket: Ticket) {
     setInbox((current) => current.status === "ready"
-      ? { status: "ready", tickets: [...current.tickets, ticket] }
+      ? { ...current, tickets: [...current.tickets, ticket] }
       : current,
     );
     addedTicket.current = ticket.id;
@@ -358,6 +471,7 @@ export default function InboxPage() {
             <p className="eyebrow"><Activity size={14} /> Support operations</p>
             <h1>Ticket inbox</h1>
             <p>Review RTC requests, continue troubleshooting, and route opportunities.</p>
+            {inbox.status === "ready" && <p className="signed-in">Signed in as {inbox.name}.</p>}
           </div>
         </div>
 
@@ -371,6 +485,12 @@ export default function InboxPage() {
               setLoadAttempt((attempt) => attempt + 1);
             }}>Retry loading tickets</button>
           </div>
+        )}
+        {inbox.status === "signed-out" && (
+          <SignInForm onSignedIn={() => {
+            setInbox({ status: "loading" });
+            setLoadAttempt((attempt) => attempt + 1);
+          }} />
         )}
         {inbox.status === "ready" && <NewLetterForm onCreated={addTicket} />}
         {inbox.status === "ready" && !selected && <p className="notice">No tickets in the queue.</p>}
