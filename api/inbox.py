@@ -8,6 +8,8 @@ from typing import Annotated, Literal, NamedTuple, Protocol, Sequence
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Owner = Literal["Maya Chen", "Jordan Lee"]
+STOPPED_WAITING = "stopped-waiting"
+DOCUMENTATION_UNOPENED = "documentation-unopened"
 QuoteFailure = Literal[
     "not-in-letter",
     "empty-quote",
@@ -138,7 +140,7 @@ class DocumentationPage(BaseModel):
         return self
 
 
-PendingReason = Literal["已经停止等待", "没有打开的公开文档"]
+PendingReason = Literal["stopped-waiting", "documentation-unopened"]
 
 
 class Pending(BaseModel):
@@ -430,7 +432,7 @@ class _MemoryTicketStore:
             if latest is None:
                 raise TicketNotFound(ticket_id)
             if len(latest.messages) == message_count and len(latest.replies) == reply_count:
-                latest = latest.model_copy(update={"pending_reason": "已经停止等待"})
+                latest = latest.model_copy(update={"pending_reason": STOPPED_WAITING})
                 self._tickets[ticket_id] = latest
             return latest
 
@@ -448,12 +450,18 @@ class _MemoryTicketStore:
             latest = self._tickets.get(ticket_id)
             if latest is None:
                 raise TicketNotFound(ticket_id)
-            if latest.handoff is not None or len(latest.messages) != message_count:
+            if len(latest.messages) != message_count:
                 return latest
-            update: dict[str, object] = {"triage": triage, "title": title}
-            if reply is not None and len(latest.replies) == reply_count:
+            spoken = any(reply.author for reply in latest.replies)
+            update: dict[str, object] = {}
+            if latest.handoff is None and not spoken:
+                update["triage"] = triage
+                update["title"] = title
+            if reply is not None and not spoken and len(latest.replies) == reply_count:
                 update["replies"] = (*latest.replies, reply)
                 update["pending_reason"] = pending_reason
+            if not update:
+                return latest
             updated = latest.model_copy(update=update)
             self._tickets[ticket_id] = updated
             return updated
@@ -541,7 +549,7 @@ class Inbox:
         if settled.page is None:
             if self._documents is None:
                 return None
-            return Reply(body=_cannot_answer(messages)), "没有打开的公开文档"
+            return Reply(body=_cannot_answer(messages)), DOCUMENTATION_UNOPENED
         return _quoted_reply(settled.page), None
 
     async def _publish_ready(

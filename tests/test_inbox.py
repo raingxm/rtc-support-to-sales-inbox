@@ -415,7 +415,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
         self.assertEqual(support.replies, ())
         self.assertIsNotNone(support.pending)
         assert support.pending is not None
-        self.assertEqual(support.pending.reason, "已经停止等待")
+        self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 90)
 
     async def test_waiting_is_measured_from_the_latest_customer_message(self):
@@ -445,7 +445,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
         self.assertIsNotNone(support)
         assert support is not None and support.pending is not None
         self.assertEqual([message.body for message in support.messages], [first, follow_up])
-        self.assertEqual(support.pending.reason, "已经停止等待")
+        self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 90)
         customer = inbox.open_customer(opened.id, opened.credential)
         self.assertEqual([message.body for message in customer.messages], [first, follow_up])
@@ -471,7 +471,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
         self.assertIsNotNone(support)
         assert support is not None and support.pending is not None
         self.assertEqual(support.id, "RTC-1043")
-        self.assertEqual(support.pending.reason, "已经停止等待")
+        self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 30)
 
     async def test_a_support_reply_is_signed_on_the_customer_and_support_entrances(self):
@@ -560,7 +560,7 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(updated.pending)
         assert updated.pending is not None
-        self.assertEqual(updated.pending.reason, "已经停止等待")
+        self.assertEqual(updated.pending.reason, "stopped-waiting")
         self.assertEqual(
             [(reply.author, reply.body) for reply in updated.replies],
             [("Riley Cho", "I'll check the token expiry with you.")],
@@ -654,7 +654,7 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
         self.assertEqual(ticket.replies, ())
         self.assertIsNotNone(ticket.pending)
         assert ticket.pending is not None
-        self.assertEqual(ticket.pending.reason, "已经停止等待")
+        self.assertEqual(ticket.pending.reason, "stopped-waiting")
         self.assertIsNone(ticket.triage)
 
         release.set()
@@ -711,13 +711,13 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
         self.assertNotIn("migration", ticket.replies[0].body.lower())
         self.assertIsNotNone(ticket.pending)
         assert ticket.pending is not None
-        self.assertEqual(ticket.pending.reason, "没有打开的公开文档")
+        self.assertEqual(ticket.pending.reason, "documentation-unopened")
         self.assertEqual(ticket.pending.waiting_seconds, 30)
 
         clock.advance(60)
         support = self._support(inbox, ticket.id)
         assert support.pending is not None
-        self.assertEqual(support.pending.reason, "没有打开的公开文档")
+        self.assertEqual(support.pending.reason, "documentation-unopened")
         self.assertEqual(support.pending.waiting_seconds, 90)
         customer = inbox.open_customer(ticket.id, ticket.credential)
         self.assertEqual(
@@ -736,7 +736,7 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(chinese.pending)
         assert chinese.pending is not None
-        self.assertEqual(chinese.pending.reason, "没有打开的公开文档")
+        self.assertEqual(chinese.pending.reason, "documentation-unopened")
 
     async def test_waiting_follows_the_latest_message_when_a_later_page_also_stays_unopened(self):
         class Analyzer:
@@ -777,7 +777,7 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
             [reply.body for reply in support.replies],
             ["I can't answer this.", "I can't answer this."],
         )
-        self.assertEqual(support.pending.reason, "没有打开的公开文档")
+        self.assertEqual(support.pending.reason, "documentation-unopened")
         self.assertEqual(support.pending.waiting_seconds, 40)
         self.assertEqual(updated.pending.waiting_seconds, 0)
         customer = inbox.open_customer(opened.id, opened.credential)
@@ -823,7 +823,7 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
             assert support.pending is not None and support.triage is not None
             self.assertEqual(support.replies, ())
             self.assertEqual(support.triage.summary, "This late reading has no documentation sentence.")
-            self.assertEqual(support.pending.reason, "已经停止等待")
+            self.assertEqual(support.pending.reason, "stopped-waiting")
             self.assertEqual(support.pending.waiting_seconds, 25)
             customer = inbox.open_customer(ticket.id, ticket.credential)
             self.assertEqual(customer.replies, ())
@@ -872,7 +872,7 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
             opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
         )
         self.assertEqual(followed.triage.summary, "First reading.")
-        self.assertEqual(followed.pending.reason, "已经停止等待")
+        self.assertEqual(followed.pending.reason, "stopped-waiting")
         release.set()
         await self._wait_until(
             lambda: self._support(inbox, opened.id).triage.summary
@@ -887,7 +887,7 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
                 [(reply.author, reply.body) for reply in support.replies],
                 [(None, "Cloud recording can be stored in COS or VOD.\nhttps://trtc.io/document/45169")],
             )
-            self.assertEqual(support.pending.reason, "已经停止等待")
+            self.assertEqual(support.pending.reason, "stopped-waiting")
 
         await self._stays(reading_arrives_without_a_reply)
 
@@ -1075,16 +1075,11 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
         ))
         inbox.reply(ticket.id, "I'll look up the recording page.", person=SUPPORT)
         release.set()
-        await self._wait_until(
-            lambda: (landed := self._support(inbox, ticket.id).triage) is not None
-            and landed.summary == "Late reading.",
-        )
 
         def only_the_signed_reply() -> None:
             support = self._support(inbox, ticket.id)
-            assert support.triage is not None
             self.assertIsNone(support.pending)
-            self.assertEqual(support.triage.summary, "Late reading.")
+            self.assertIsNone(support.triage)
             expected = [("Riley Cho", "I'll look up the recording page.")]
             self.assertEqual([(reply.author, reply.body) for reply in support.replies], expected)
             customer = inbox.open_customer(ticket.id, ticket.credential)
@@ -1092,6 +1087,126 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
             self.assertNotIn(quote, customer.model_dump_json())
 
         await self._stays(only_the_signed_reply)
+
+    async def test_a_later_message_after_a_support_reply_does_not_receive_a_late_quote(self):
+        release = asyncio.Event()
+        quote = "Recordings can be stored on AWS."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    await release.wait()
+                else:
+                    raise AnalysisFailed
+                return _Draft(
+                    title="Follow-up",
+                    kind="support",
+                    summary="Late follow-up.",
+                    support_steps=[],
+                    evidence=[],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                await release.wait()
+                return DocumentationPage(url="https://trtc.io/document/46960", quote=quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Cedarline Media", body="Do you support cloud recording?",
+        ))
+        inbox.reply(opened.id, "I'll look up the recording page.", person=SUPPORT)
+        await inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        )
+        release.set()
+
+        def only_the_signed_reply() -> None:
+            support = self._support(inbox, opened.id)
+            assert support.pending is not None
+            self.assertIsNone(support.triage)
+            self.assertEqual(support.pending.reason, "stopped-waiting")
+            self.assertEqual(
+                [(reply.author, reply.body) for reply in support.replies],
+                [("Riley Cho", "I'll look up the recording page.")],
+            )
+            customer = inbox.open_customer(opened.id, opened.credential)
+            self.assertNotIn(quote, customer.model_dump_json())
+
+        await self._stays(only_the_signed_reply)
+
+    async def test_a_confirmed_handoff_still_receives_a_late_quote(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        late_quote = "Recordings can be stored on AWS."
+
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                if "\n\n" in body:
+                    started.set()
+                    await release.wait()
+                    return _Draft(
+                        title="Follow-up",
+                        kind="support",
+                        summary="This reading must not replace the confirmed one.",
+                        support_steps=[],
+                        evidence=[],
+                        questions=[],
+                    )
+                return _Draft(
+                    title="Pilot",
+                    kind="mixed",
+                    summary="First reading.",
+                    support_steps=[],
+                    evidence=["launch a pilot next month"],
+                    questions=[],
+                )
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                if "\n\n" in body:
+                    await release.wait()
+                    return DocumentationPage(url="https://trtc.io/document/46960", quote=late_quote)
+                return DocumentationPage(
+                    url="https://trtc.io/document/45169",
+                    quote="Cloud recording can be stored in COS or VOD.",
+                )
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(), wait_limit=0.05,
+        )
+        opened = await inbox.submit(Letter(
+            customer="Harborline Labs",
+            body="We want to launch a pilot next month.",
+        ))
+        appending = asyncio.create_task(inbox.append_customer_message(
+            opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
+        ))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        followed = await appending
+        assert followed.pending is not None
+        self.assertEqual(followed.pending.reason, "stopped-waiting")
+        assigned = inbox.confirm_handoff(opened.id, "Maya Chen", person=SUPPORT)
+        release.set()
+        await self._wait_until(
+            lambda: any(late_quote in reply.body for reply in self._support(inbox, opened.id).replies),
+        )
+
+        support = self._support(inbox, opened.id)
+        assert support.handoff is not None and support.triage is not None
+        self.assertEqual(support.handoff.owner, "Maya Chen")
+        self.assertEqual(support.triage, assigned.triage)
+        self.assertIsNone(support.pending)
+        self.assertEqual([reply.author for reply in support.replies], [None, None])
+        self.assertEqual(support.replies[1].body, "Recordings can be stored on AWS.\nhttps://trtc.io/document/46960")
+        customer = inbox.open_customer(opened.id, opened.credential)
+        self.assertEqual(
+            [(reply.author, reply.body) for reply in customer.replies],
+            [(reply.author, reply.body) for reply in support.replies],
+        )
 
     def _support(self, inbox: Inbox, ticket_id: str) -> Ticket:
         support = inbox.get(ticket_id, SUPPORT)

@@ -3,7 +3,10 @@ from typing import Sequence
 from psycopg import Connection, IsolationLevel, connect
 from psycopg.types.json import Json
 
-from api.inbox import CustomerMessage, Owner, Reply, Ticket, TicketContent, TicketNotFound, Triage
+from api.inbox import (
+    STOPPED_WAITING, CustomerMessage, Owner, PendingReason, Reply, Ticket, TicketContent, TicketNotFound,
+    Triage,
+)
 
 
 _CREATE_TICKETS = """
@@ -155,7 +158,7 @@ class PostgresTicketStore:
         triage: Triage,
         title: str,
         reply: Reply | None,
-        pending_reason: str | None,
+        pending_reason: PendingReason | None,
     ) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
@@ -165,12 +168,18 @@ class PostgresTicketStore:
             if row is None:
                 raise TicketNotFound(ticket_id)
             latest = _ticket(row)
-            if latest.handoff is not None or len(latest.messages) != message_count:
+            if len(latest.messages) != message_count:
                 return latest
-            update: dict[str, object] = {"triage": triage, "title": title}
-            if reply is not None and len(latest.replies) == reply_count:
+            spoken = any(reply.author for reply in latest.replies)
+            update: dict[str, object] = {}
+            if latest.handoff is None and not spoken:
+                update["triage"] = triage
+                update["title"] = title
+            if reply is not None and not spoken and len(latest.replies) == reply_count:
                 update["replies"] = (*latest.replies, reply)
                 update["pending_reason"] = pending_reason
+            if not update:
+                return latest
             return self._write(connection, latest.model_copy(update=update))
 
     def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
@@ -184,7 +193,7 @@ class PostgresTicketStore:
             latest = _ticket(row)
             if len(latest.messages) != message_count or len(latest.replies) != reply_count:
                 return latest
-            return self._write(connection, latest.model_copy(update={"pending_reason": "已经停止等待"}))
+            return self._write(connection, latest.model_copy(update={"pending_reason": STOPPED_WAITING}))
 
     def add_reply(self, ticket_id: str, reply: Reply) -> Ticket:
         with self._connect() as connection:
