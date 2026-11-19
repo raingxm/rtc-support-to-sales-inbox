@@ -9,7 +9,7 @@ from psycopg import connect, sql
 from psycopg.conninfo import make_conninfo
 
 from api.inbox import (
-    DocumentationPage, HandoffRejected, Inbox, Letter, Owner, QuoteRejected, SAMPLES, SupportPerson,
+    DocumentationPage, HandoffRejected, Inbox, Letter, Owner, QuoteRejected, ReplyContextChanged, SAMPLES, SupportPerson,
     TicketNotFound, _Draft,
 )
 from api.postgres import PostgresTicketStore
@@ -190,6 +190,64 @@ class PostgresInboxTest(IsolatedAsyncioTestCase):
             [(reply.author, reply.body) for reply in seen.replies],
             [(_SUPPORT.name, "I'll check the recording failure.")],
         )
+
+    async def test_a_persisted_support_draft_expires_when_the_customer_speaks(self) -> None:
+        release = asyncio.Event()
+        quote = "Cloud recording can be stored in COS or VOD."
+
+        class Analyzer(FixedAnalyzer):
+            async def draft(self, body: str) -> _Draft:
+                draft = await super().draft(body)
+                if "reject this follow-up" in body:
+                    return draft.model_copy(update={"evidence": ["fabricated evidence"]})
+                return draft
+
+        class Documents:
+            async def open(self, body: str) -> DocumentationPage:
+                await release.wait()
+                return DocumentationPage(url="https://trtc.io/document/45169", quote=quote)
+
+        inbox = Inbox.open(
+            SAMPLES, analyzer=Analyzer(), documents=Documents(),
+            store=PostgresTicketStore(self.dsn), wait_limit=0.05,
+        )
+        ticket = await inbox.submit(Letter(customer="Cypress Video", body=_PILOT))
+        inbox.reply(ticket.id, "I'll check the recording settings.", person=_SUPPORT)
+        release.set()
+        reopened = self.open_inbox()
+        async with asyncio.timeout(3):
+            while True:
+                drafted = reopened.get(ticket.id, _SUPPORT)
+                assert drafted is not None
+                if drafted.reply_draft is not None:
+                    break
+                await asyncio.sleep(0.01)
+
+        self.assertIn(quote, drafted.reply_draft)
+        self.assertNotIn(quote, reopened.open_customer(ticket.id, ticket.credential).model_dump_json())
+        with self.assertRaises(QuoteRejected):
+            await inbox.append_customer_message(
+                ticket.id, "Please reject this follow-up.", credential=ticket.credential,
+            )
+        restored = reopened.get(ticket.id, _SUPPORT)
+        assert restored is not None
+        self.assertEqual(restored.messages, drafted.messages)
+        self.assertEqual(restored.reply_draft, drafted.reply_draft)
+
+        latest = await inbox.append_customer_message(
+            ticket.id, "Can you check the storage region?", credential=ticket.credential,
+        )
+        self.assertIsNone(latest.reply_draft)
+        self.assertEqual(latest.replies, drafted.replies)
+
+        colleague = SupportPerson(name="Avery Quinn")
+        with self.assertRaises(ReplyContextChanged):
+            reopened.reply(ticket.id, "Old edited draft", person=colleague, expected_revision=drafted.reply_revision)
+        signed = reopened.reply(
+            ticket.id, "I'll check the storage region.", person=colleague, expected_revision=latest.reply_revision,
+        )
+        self.assertEqual([reply.author for reply in signed.replies], [_SUPPORT.name, colleague.name])
+        self.assertEqual(signed, reopened.get(ticket.id, _SUPPORT))
 
     async def test_reopening_keeps_a_quoted_reply_and_an_unopened_page(self) -> None:
         class Analyzer:

@@ -43,6 +43,8 @@ const ticketSchema = z.object({
   handoff: z.object({ owner: ownerSchema }).nullable(),
   confirmed_by: z.string().nullable(),
   withdrawn_by: z.string().nullable(),
+  reply_draft: z.string().nullable(),
+  reply_revision: z.int().nonnegative(),
   taken_over: z.boolean(),
   handed_back_by: z.string().nullable(),
   pending: z.object({
@@ -59,6 +61,7 @@ const supportTokenKey = "rtc-support-token";
 const supportNameKey = "rtc-support-name";
 
 export class SupportSignInRequired extends Error {}
+export class ReplyContextChanged extends Error {}
 
 export function supportToken() {
   return sessionStorage.getItem(supportTokenKey) ?? "";
@@ -209,13 +212,13 @@ export async function handBack(ticketId: string) {
   return ticketSchema.parse(await response.json());
 }
 
-export async function sendReply(ticketId: string, body: string) {
+export async function sendReply(ticketId: string, body: string, revision: number) {
   const response = await fetch(
     "/api/tickets/" + encodeURIComponent(ticketId) + "/replies",
     {
       method: "POST",
       headers: supportHeaders(true),
-      body: JSON.stringify({ body }),
+      body: JSON.stringify({ body, expected_revision: revision }),
       signal: AbortSignal.timeout(8000),
     },
   );
@@ -223,6 +226,7 @@ export async function sendReply(ticketId: string, body: string) {
     clearSupportSession();
     throw new SupportSignInRequired();
   }
+  if (response.status === 409) throw new ReplyContextChanged();
   if (response.status === 422) throw new LetterSubmissionError("Write a reply before sending it.");
   if (!response.ok) throw new Error("Could not send the reply");
   return ticketSchema.parse(await response.json());

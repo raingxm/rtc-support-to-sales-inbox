@@ -149,7 +149,12 @@ class AppendedMessageTest(IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(failure.exception.reason, "not-in-letter")
-        self.assertEqual(inbox.get(opened.id, SUPPORT), opened)
+        stored = inbox.get(opened.id, SUPPORT)
+        assert stored is not None
+        self.assertEqual(
+            stored.model_dump(exclude={"reply_revision"}),
+            opened.model_dump(exclude={"reply_revision"}),
+        )
 
     async def test_a_later_message_keeps_a_confirmed_handoff_and_its_triage(self):
         class Analyzer:
@@ -1193,7 +1198,7 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
         self.assertIsNone(support.replies[0].author)
         self.assertNotIn(stale_quote, support.replies[0].body)
 
-    async def test_a_late_quote_after_a_support_reply_stays_out_of_the_conversation(self):
+    async def test_a_late_quote_stays_as_a_support_draft_until_handback(self):
         release = asyncio.Event()
         quote = "Cloud recording can be stored in COS or VOD."
 
@@ -1226,16 +1231,33 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
         def only_the_signed_reply() -> None:
             support = self._support(inbox, ticket.id)
             self.assertIsNone(support.pending)
-            self.assertIsNone(support.triage)
+            assert support.triage is not None
+            self.assertEqual(support.triage.summary, "Late reading.")
+            self.assertIn(quote, support.reply_draft or "")
+            self.assertIn("https://trtc.io/document/45169", support.reply_draft or "")
             expected = [("Riley Cho", "I'll look up the recording page.")]
             self.assertEqual([(reply.author, reply.body) for reply in support.replies], expected)
             customer = inbox.open_customer(ticket.id, ticket.credential)
             self.assertEqual([(reply.author, reply.body) for reply in customer.replies], expected)
             self.assertNotIn(quote, customer.model_dump_json())
 
-        await self._stays(only_the_signed_reply)
+        await self._wait_until(lambda: self._support(inbox, ticket.id).reply_draft is not None)
+        only_the_signed_reply()
+        colleague = SupportPerson(name="Avery Quinn")
+        support = self._support(inbox, ticket.id)
+        handed_back = inbox.hand_back(ticket.id, person=colleague)
+        self.assertIsNone(handed_back.reply_draft)
+        self.assertEqual(handed_back.replies, support.replies)
+        self.assertEqual(handed_back.handed_back_by, colleague.name)
+        self.assertFalse(handed_back.taken_over)
 
-    async def test_a_later_message_after_a_support_reply_does_not_receive_a_late_quote(self):
+        next_turn = await inbox.append_customer_message(
+            ticket.id, "Can you confirm where it is stored?", credential=ticket.credential,
+        )
+        self.assertEqual([reply.author for reply in next_turn.replies], ["Riley Cho", None])
+        self.assertIn(quote, next_turn.replies[-1].body)
+
+    async def test_followup_during_takeover_stays_unanswered_after_handback(self):
         release = asyncio.Event()
         quote = "Recordings can be stored on AWS."
 
@@ -1269,13 +1291,15 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
         await inbox.append_customer_message(
             opened.id, "Can those recordings be stored on AWS?", credential=opened.credential,
         )
+        inbox.hand_back(opened.id, person=SupportPerson(name="Avery Quinn"))
         release.set()
 
         def only_the_signed_reply() -> None:
             support = self._support(inbox, opened.id)
-            assert support.pending is not None
-            self.assertIsNone(support.triage)
-            self.assertEqual(support.pending.reason, "stopped-waiting")
+            self.assertIsNone(support.pending)
+            assert support.triage is not None
+            self.assertEqual(support.triage.summary, "Late follow-up.")
+            self.assertIsNone(support.reply_draft)
             self.assertEqual(
                 [(reply.author, reply.body) for reply in support.replies],
                 [("Riley Cho", "I'll look up the recording page.")],
@@ -1283,7 +1307,8 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
             customer = inbox.open_customer(opened.id, opened.credential)
             self.assertNotIn(quote, customer.model_dump_json())
 
-        await self._stays(only_the_signed_reply)
+        await self._wait_until(lambda: self._support(inbox, opened.id).triage is not None)
+        only_the_signed_reply()
 
     async def test_a_confirmed_handoff_still_receives_a_late_quote(self):
         started = asyncio.Event()
@@ -1354,6 +1379,16 @@ class LateQuotedReplyTest(IsolatedAsyncioTestCase):
             [(reply.author, reply.body) for reply in customer.replies],
             [(reply.author, reply.body) for reply in support.replies],
         )
+
+        inbox.reply(opened.id, "I can check the storage settings.", person=SUPPORT)
+        inbox.hand_back(opened.id, person=SupportPerson(name="Avery Quinn"))
+        next_turn = await inbox.append_customer_message(
+            opened.id, "Can you confirm which regions are supported?", credential=opened.credential,
+        )
+        self.assertIn(late_quote, next_turn.replies[-1].body)
+        self.assertIsNone(next_turn.replies[-1].author)
+        self.assertEqual(next_turn.handoff, assigned.handoff)
+        self.assertEqual(next_turn.triage, assigned.triage)
 
     def _support(self, inbox: Inbox, ticket_id: str) -> Ticket:
         support = inbox.get(ticket_id, SUPPORT)

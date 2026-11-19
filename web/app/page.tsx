@@ -7,7 +7,8 @@ import {
 import { type FormEvent, type ReactNode, type Ref, useEffect, useRef, useState } from "react";
 import { DeskFrame } from "./frame";
 import {
-  createHandoff, handBack as requestHandBack, LetterSubmissionError, listTickets, owners, sendReply, signIn, submitLetter,
+  createHandoff, fetchTicket, handBack as requestHandBack, LetterSubmissionError, listTickets, owners,
+  ReplyContextChanged, sendReply, signIn, submitLetter,
   withdrawHandoff,
   supportName, supportToken, SupportSignInRequired, type EvidenceSpan, type Owner, type Ticket,
 } from "../lib/tickets";
@@ -317,38 +318,65 @@ function ReplyForm({ ticket, onUpdated }: {
   ticket: Ticket;
   onUpdated: (ticket: Ticket) => void;
 }) {
-  const [body, setBody] = useState("");
+  const revision = ticket.reply_revision;
+  const [edit, setEdit] = useState<{ revision: number; body: string }>();
+  const [conflictRevision, setConflictRevision] = useState<number>();
   const [submission, setSubmission] = useState<"idle" | "pending" | "error">("idle");
   const pending = submission === "pending";
+  const waitingForRefresh = conflictRevision === revision;
+  const discarded = conflictRevision !== undefined || (edit !== undefined && edit.revision !== revision);
+  const body = waitingForRefresh ? "" : (edit?.revision === revision ? edit.body : ticket.reply_draft ?? "");
+  const fieldId = "reply-" + ticket.id;
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (pending || !body.trim()) return;
+    if (pending || waitingForRefresh || !body.trim()) return;
     setSubmission("pending");
     try {
-      onUpdated(await sendReply(ticket.id, body));
-      setBody("");
+      onUpdated(await sendReply(ticket.id, body, revision));
+      setEdit(undefined);
+      setConflictRevision(undefined);
       setSubmission("idle");
-    } catch {
-      setSubmission("error");
+    } catch (error) {
+      if (error instanceof ReplyContextChanged) {
+        setConflictRevision(revision);
+        setSubmission("idle");
+      } else {
+        setSubmission("error");
+      }
     }
   }
 
   return (
     <form className="reply-form" onSubmit={send}>
-      <label htmlFor={"reply-" + ticket.id}>Reply to the customer</label>
+      <label htmlFor={fieldId}>Reply to the customer</label>
+      {ticket.reply_draft && !waitingForRefresh && (
+        <p className="reply-draft-note" id={fieldId + "-draft"}>Suggested draft · Only visible to support</p>
+      )}
       <textarea
-        id={"reply-" + ticket.id}
+        id={fieldId}
+        aria-describedby={ticket.reply_draft && !waitingForRefresh ? fieldId + "-draft" : undefined}
         value={body}
         rows={3}
-        disabled={pending}
-        onChange={(event) => setBody(event.target.value)}
+        disabled={pending || waitingForRefresh}
+        onChange={(event) => {
+          setEdit({ revision, body: event.target.value });
+          setConflictRevision(undefined);
+          setSubmission("idle");
+        }}
       />
-      <button className="action" type="submit" disabled={pending || !body.trim()}>
+      <button className="action" type="submit" disabled={pending || waitingForRefresh || !body.trim()}>
         <span>{pending ? "Sending…" : "Send reply"}</span>
         <ArrowRight size={16} />
       </button>
-      {submission === "error" && (
+      {discarded && (
+        <p className="reply-draft-note" role="status">
+          {waitingForRefresh
+            ? "The conversation changed. Waiting for the latest messages."
+            : "The conversation changed. Review the latest messages before replying."}
+        </p>
+      )}
+      {submission === "error" && !discarded && (
         <p className="error-note" role="alert">Could not send that reply. Try again.</p>
       )}
     </form>
@@ -400,7 +428,7 @@ function TicketDetail({ ticket, onUpdated, headingRef }: {
           </p>
         )}
         <Takeover ticket={ticket} onUpdated={onUpdated} />
-        <ReplyForm ticket={ticket} onUpdated={onUpdated} />
+        <ReplyForm key={ticket.id} ticket={ticket} onUpdated={onUpdated} />
       </section>
 
       {triage && <section className="triage" aria-labelledby="triage-heading">
@@ -498,12 +526,23 @@ function SignInForm({ onSignedIn }: { onSignedIn: () => void }) {
   );
 }
 
+function withUpdatedTicket(inbox: InboxState, updated: Ticket): InboxState {
+  if (inbox.status !== "ready") return inbox;
+  return {
+    ...inbox,
+    tickets: inbox.tickets.map((ticket) =>
+      ticket.id === updated.id && ticket.reply_revision <= updated.reply_revision ? updated : ticket,
+    ),
+  };
+}
+
 export default function InboxPage() {
   const [inbox, setInbox] = useState<InboxState>({ status: "loading" });
   const [selectedId, setSelectedId] = useState<string>();
   const [loadAttempt, setLoadAttempt] = useState(0);
   const ticketHeading = useRef<HTMLHeadingElement>(null);
   const addedTicket = useRef<string>(undefined);
+  const ticketWrites = useRef(0);
 
   useEffect(() => {
     if (!supportToken()) {
@@ -523,10 +562,8 @@ export default function InboxPage() {
   }, [loadAttempt]);
 
   function updateTicket(updated: Ticket) {
-    setInbox((current) => current.status === "ready"
-      ? { ...current, tickets: current.tickets.map((ticket) => ticket.id === updated.id ? updated : ticket) }
-      : current,
-    );
+    ticketWrites.current++;
+    setInbox((current) => withUpdatedTicket(current, updated));
   }
 
   function addTicket(ticket: Ticket) {
@@ -547,6 +584,38 @@ export default function InboxPage() {
 
   const tickets = inbox.status === "ready" ? inbox.tickets : [];
   const selected = tickets.find((ticket) => ticket.id === selectedId) ?? tickets[0];
+
+  const openTicketId = selected?.id;
+
+  useEffect(() => {
+    if (!openTicketId) return;
+    const ticketId = openTicketId;
+    const controller = new AbortController();
+    let timer = 0;
+
+    async function refresh() {
+      const writes = ticketWrites.current;
+      try {
+        if (document.visibilityState === "hidden") return;
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]);
+        const updated = await fetchTicket(ticketId, signal);
+        if (controller.signal.aborted || writes !== ticketWrites.current || !updated) return;
+        setInbox((current) => withUpdatedTicket(current, updated));
+      } catch (error) {
+        if (!controller.signal.aborted && error instanceof SupportSignInRequired) {
+          setInbox({ status: "signed-out" });
+        }
+      } finally {
+        if (!controller.signal.aborted) timer = window.setTimeout(refresh, 1500);
+      }
+    }
+
+    void refresh();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [openTicketId]);
 
   return (
     <DeskFrame section="RTC workspace">

@@ -110,7 +110,7 @@ class PostgresTicketStore:
         assert stored is not None
         return _ticket(stored)
 
-    def append_message(self, ticket_id: str, message: CustomerMessage) -> Ticket:
+    def append_message(self, ticket_id: str, message: CustomerMessage) -> tuple[Ticket, str | None]:
         with self._connect() as connection:
             row = connection.execute(
                 _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
@@ -119,91 +119,59 @@ class PostgresTicketStore:
             if row is None:
                 raise TicketNotFound(ticket_id)
             latest = _ticket(row)
-            return self._write(connection, latest.model_copy(update={"messages": (*latest.messages, message)}))
+            return self._write(connection, latest.with_customer_message(message)), latest.reply_draft
 
-    def drop_last_message(self, ticket_id: str, message_count: int) -> Ticket:
+    def drop_last_message(self, saved: Ticket, prior_draft: str | None) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
                 _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
-                (ticket_id,),
+                (saved.id,),
             ).fetchone()
             if row is None:
-                raise TicketNotFound(ticket_id)
+                raise TicketNotFound(saved.id)
             latest = _ticket(row)
-            if len(latest.messages) != message_count:
-                return latest
-            return self._write(connection, latest.model_copy(update={"messages": latest.messages[:-1]}))
+            updated = latest.without_rejected_message(saved, prior_draft)
+            return latest if updated is latest else self._write(connection, updated)
 
     def delete(self, ticket_id: str) -> None:
         with self._connect() as connection:
             connection.execute("DELETE FROM rtc_tickets WHERE id = %s", (ticket_id,))
 
-    def apply_analysis(self, ticket_id: str, triage: Triage, title: str, message_count: int) -> Ticket:
-        with self._connect() as connection:
-            row = connection.execute(
-                _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
-                (ticket_id,),
-            ).fetchone()
-            if row is None:
-                raise TicketNotFound(ticket_id)
-            latest = _ticket(row)
-            if latest.handoff is not None or len(latest.messages) != message_count:
-                return latest
-            updated = latest.model_copy(update={"triage": triage, "title": title, "pending_reason": None})
-            connection.execute(
-                "UPDATE rtc_tickets SET content = %s WHERE id = %s",
-                (Json(updated.model_dump(mode="json", include=set(TicketContent.model_fields))), ticket_id),
-            )
-            stored = connection.execute(_SELECT_TICKETS + "WHERE t.id = %s", (ticket_id,)).fetchone()
-        assert stored is not None
-        return _ticket(stored)
-
     def land_analysis(
         self,
-        ticket_id: str,
-        message_count: int,
-        reply_count: int,
+        started: Ticket,
         triage: Triage,
         title: str,
         reply: Reply | None,
         pending_reason: PendingReason | None,
+        *,
+        late: bool,
     ) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
                 _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
-                (ticket_id,),
+                (started.id,),
             ).fetchone()
             if row is None:
-                raise TicketNotFound(ticket_id)
+                raise TicketNotFound(started.id)
             latest = _ticket(row)
-            if len(latest.messages) != message_count:
-                return latest
-            spoken = any(reply.author for reply in latest.replies)
-            update: dict[str, object] = {}
-            if latest.handoff is None and not spoken:
-                update["triage"] = triage
-                update["title"] = title
-            if reply is not None and not spoken and len(latest.replies) == reply_count:
-                update["replies"] = (*latest.replies, reply)
-                update["pending_reason"] = pending_reason
-            if not update:
-                return latest
-            return self._write(connection, latest.model_copy(update=update))
+            updated = latest.with_analysis(started, triage, title, reply, pending_reason, late=late)
+            return latest if updated is latest else self._write(connection, updated)
 
-    def mark_stopped_waiting(self, ticket_id: str, message_count: int, reply_count: int) -> Ticket:
+    def mark_stopped_waiting(self, started: Ticket) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
                 _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
-                (ticket_id,),
+                (started.id,),
             ).fetchone()
             if row is None:
-                raise TicketNotFound(ticket_id)
+                raise TicketNotFound(started.id)
             latest = _ticket(row)
-            if len(latest.messages) != message_count or len(latest.replies) != reply_count:
+            if latest.reply_revision != started.reply_revision:
                 return latest
             return self._write(connection, latest.model_copy(update={"pending_reason": STOPPED_WAITING}))
 
-    def add_reply(self, ticket_id: str, reply: Reply) -> Ticket:
+    def add_reply(self, ticket_id: str, reply: Reply, expected_revision: int | None) -> Ticket:
         with self._connect() as connection:
             row = connection.execute(
                 _SELECT_TICKETS + "WHERE t.id = %s FOR UPDATE OF t",
@@ -212,11 +180,7 @@ class PostgresTicketStore:
             if row is None:
                 raise TicketNotFound(ticket_id)
             latest = _ticket(row)
-            return self._write(connection, latest.model_copy(update={
-                "replies": (*latest.replies, reply),
-                "pending_reason": None,
-                "taken_over": True,
-            }))
+            return self._write(connection, latest.with_support_reply(reply, expected_revision))
 
     def hand_back(self, ticket_id: str, handed_back_by: str) -> Ticket:
         with self._connect() as connection:
