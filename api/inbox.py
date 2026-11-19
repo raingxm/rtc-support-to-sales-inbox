@@ -135,6 +135,7 @@ class Reply(BaseModel):
     model_config = ConfigDict(frozen=True)
     body: str
     author: str | None = None
+    sent_at: datetime | None = None
 
     @model_validator(mode="after")
     def check_body(self) -> "Reply":
@@ -595,6 +596,11 @@ class Inbox:
     def _now(self) -> datetime:
         return self._clock.now() if self._clock is not None else datetime.now(timezone.utc)
 
+    def _timed_reply(self, reply: Reply) -> Reply:
+        if reply.sent_at is not None:
+            return reply
+        return reply.model_copy(update={"sent_at": self._now()})
+
     def _present(self, ticket: Ticket) -> Ticket:
         if ticket.pending_reason is None:
             return ticket
@@ -642,6 +648,8 @@ class Inbox:
         elif not late and self._documents is not None:
             reply = Reply(body=_cannot_answer(started.messages))
             pending_reason = DOCUMENTATION_UNOPENED
+        if reply is not None:
+            reply = self._timed_reply(reply)
         return self._present(await asyncio.to_thread(
             self._store.land_analysis,
             started,
@@ -794,7 +802,7 @@ class Inbox:
         person: SupportPerson,
         expected_revision: int | None = None,
     ) -> Ticket:
-        reply = Reply(body=body, author=_signed_in(person).name)
+        reply = self._timed_reply(Reply(body=body, author=_signed_in(person).name))
         return self._present(self._store.add_reply(ticket_id, reply, expected_revision))
 
 

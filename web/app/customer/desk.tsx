@@ -109,6 +109,49 @@ function olderThan(current: CustomerRecord, next: CustomerRecord) {
   return next.messages.length < current.messages.length || next.replies.length < current.replies.length;
 }
 
+function sentAt(value: string | null | undefined) {
+  if (!value) return null;
+  const time = Date.parse(value);
+  return Number.isNaN(time) ? null : time;
+}
+
+type ThreadTurn = {
+  key: string;
+  role: "customer" | "desk";
+  body: string;
+  author: string | null;
+  at: number | null;
+  index: number;
+};
+
+function threadTurns(ticket: CustomerRecord): ThreadTurn[] {
+  const turns: ThreadTurn[] = [
+    ...ticket.messages.map((message, index) => ({
+      key: "message-" + index,
+      role: "customer" as const,
+      body: message.body,
+      author: null,
+      at: sentAt(message.spoken_at),
+      index,
+    })),
+    ...ticket.replies.map((reply, index) => ({
+      key: "reply-" + index,
+      role: "desk" as const,
+      body: reply.body,
+      author: reply.author,
+      at: sentAt(reply.sent_at),
+      index,
+    })),
+  ];
+  return turns.sort((left, right) => {
+    if (left.at !== null && right.at !== null && left.at !== right.at) return left.at - right.at;
+    if (left.at !== null && right.at === null) return -1;
+    if (left.at === null && right.at !== null) return 1;
+    if (left.role !== right.role) return left.role === "customer" ? -1 : 1;
+    return left.index - right.index;
+  });
+}
+
 export function CustomerTicket({ ticketId, credential }: { ticketId: string; credential: string }) {
   const [view, setView] = useState<TicketView>({ status: "loading" });
   const [body, setBody] = useState("");
@@ -244,16 +287,17 @@ export function CustomerTicket({ ticketId, credential }: { ticketId: string; cre
               }}>Retry loading ticket</button>
             </div>
           )}
-          {ticket?.messages.map((message, index) => (
-            <div className="message customer" key={"message-" + index}>
-              <p>{message.body}</p>
-            </div>
-          ))}
-          {ticket?.replies.map((reply, index) => (
-            <div className="message desk" key={"reply-" + index}>
-              <span className="customer-author">{reply.author ?? "Relay Desk"}</span>
-              <p>{reply.body}</p>
-            </div>
+          {ticket && threadTurns(ticket).map((turn) => (
+            turn.role === "customer" ? (
+              <div className="message customer" key={turn.key}>
+                <p>{turn.body}</p>
+              </div>
+            ) : (
+              <div className="message desk" key={turn.key}>
+                <span className="customer-author">{turn.author ?? "Relay Desk"}</span>
+                <p>{turn.body}</p>
+              </div>
+            )
           ))}
         </div>
       </div>

@@ -189,4 +189,9 @@ test("customer and support show the same conversation", async ({ page, request }
   expect(sent.ok()).toBeTruthy();
   await expect(page.locator(".message.desk")).toContainText("Riley Cho");
   await expect(page.locator(".message.desk p")).toHaveText(reply);
+
+  const later = "The room name is studio-west.";
+  await page.getByRole("textbox", { name: "Add a message" }).fill(later);
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.locator(".message p")).toHaveText([first, second, reply, later]);
 });

@@ -479,6 +479,39 @@ class CustomerWordsFirstTest(IsolatedAsyncioTestCase):
         self.assertEqual(support.pending.reason, "stopped-waiting")
         self.assertEqual(support.pending.waiting_seconds, 30)
 
+    async def test_a_reply_keeps_its_place_between_the_customer_messages_around_it(self):
+        class Analyzer:
+            async def draft(self, body: str) -> _Draft:
+                raise AnalysisFailed
+
+        clock = _Clock()
+        inbox = Inbox.open(SAMPLES, analyzer=Analyzer(), clock=clock)
+        opened = await inbox.submit(Letter(
+            customer="Northwind Studio",
+            body="My join call returns an invalid token error.",
+        ))
+        clock.advance(10)
+        inbox.reply(opened.id, "Which room name?", person=SUPPORT)
+        clock.advance(10)
+        await inbox.append_customer_message(
+            opened.id,
+            "The room name is studio-west.",
+            credential=opened.credential,
+        )
+
+        customer = inbox.open_customer(opened.id, opened.credential)
+        self.assertEqual(
+            [message.spoken_at for message in customer.messages],
+            [
+                datetime(2026, 11, 18, 6, 0, tzinfo=timezone.utc),
+                datetime(2026, 11, 18, 6, 0, 20, tzinfo=timezone.utc),
+            ],
+        )
+        self.assertEqual(
+            customer.replies[0].sent_at,
+            datetime(2026, 11, 18, 6, 0, 10, tzinfo=timezone.utc),
+        )
+
     async def test_a_support_reply_is_signed_on_the_customer_and_support_entrances(self):
         class Analyzer:
             async def draft(self, body: str) -> _Draft:

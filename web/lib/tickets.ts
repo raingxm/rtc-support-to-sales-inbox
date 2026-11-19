@@ -29,6 +29,7 @@ const triageSchema = z.discriminatedUnion("kind", [
 const replySchema = z.object({
   body: z.string(),
   author: z.string().nullable(),
+  sent_at: z.string().nullable().optional(),
 });
 export type Reply = z.infer<typeof replySchema>;
 
@@ -237,7 +238,10 @@ const customerSchema = z.object({
   credential: z.string().min(1),
   title: z.string(),
   customer: z.string(),
-  messages: z.array(z.object({ body: z.string() })).min(1),
+  messages: z.array(z.object({
+    body: z.string(),
+    spoken_at: z.string().nullable().optional(),
+  })).min(1),
   replies: z.array(replySchema),
 });
 export type CustomerTicket = z.infer<typeof customerSchema>;
